@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-dioxus = { version = "0.3" }
-dioxus-free-icons = { version = "0.6", features = ["bootstrap"] }
-dioxus-interpreter-js = { version = "=0.3.1" }
-dioxus-liveview = { version = "0.3", features = ["salvo"] }
-dioxus-ssr = "0.3"
-dioxus-hot-reload = "0.1"
+dioxus = { git = "https://github.com/dioxuslabs/dioxus" }
+# dioxus-free-icons = { version = "0.6", features = ["bootstrap"] }
+dioxus-interpreter-js = { git = "https://github.com/dioxuslabs/dioxus" }
+dioxus-liveview = { git = "https://github.com/dioxuslabs/dioxus", features = ["salvo"] }
+dioxus-ssr = { git = "https://github.com/dioxuslabs/dioxus" }
+dioxus-hot-reload = { git = "https://github.com/dioxuslabs/dioxus" }
 salvo = { version = "0.37", features = ["full", "affix", "ws"] }
 sqlx = { version = "0.7.0-alpha.2", features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["full"] }

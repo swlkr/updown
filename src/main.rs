@@ -4,7 +4,6 @@ use anyhow::Result;
 use dioxus::prelude::*;
 use dioxus_hot_reload::Config;
 use dioxus_liveview::LiveViewPool;
-use dioxus_ssr::render_lazy;
 use salvo::{
     affix, handler,
     hyper::header::ORIGIN,
@@ -17,7 +16,9 @@ use std::{net::SocketAddr, sync::Arc};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    hot_reload_init!(Config::new().with_rebuild_command("cargo run"));
+    hot_reload_init!(Config::new()
+        .with_logging(true)
+        .with_rebuild_command("cargo run"));
     let addr: SocketAddr = "127.0.0.1:9001"
         .parse()
         .expect("Expected a string in the form of <ip address>:<port>");
@@ -48,44 +49,26 @@ struct ServerCx {
     ws_addr: String,
 }
 
-#[derive(Props, PartialEq)]
-struct IndexProps {
-    sx: ServerCx,
-}
-
-fn Index(cx: Scope<IndexProps>) -> Element {
-    let IndexProps { sx, .. } = cx.props;
-    let ServerCx { liveview_js, .. } = sx;
-    cx.render(rsx! {
-        "<!DOCTYPE html>"
-        "<html lang=en>"
-            head {
-                title { "updown" }
-                meta { charset: "utf-8" }
-                meta { name: "viewport", content:"width=device-width" }
-                link { rel: "stylesheet", href: "/tw.css" }
-            }
-            body {
-                div { id: "main" }
-                "{liveview_js}"
-            }
-        "</html>"
-    })
-}
-
 #[handler]
-fn index(req: &mut Request, res: &mut Response, depot: &mut Depot) -> Result<()> {
+fn index(res: &mut Response) -> Result<()> {
     let ws_addr = "ws://localhost:9001/ws".to_string();
     let liveview_js = dioxus_liveview::interpreter_glue(&ws_addr);
-    let sx = ServerCx {
-        ws_addr,
-        liveview_js,
-    };
-    res.render(Text::Html(render_lazy(rsx! {
-        Index {
-            sx: sx
-        }
-    })));
+    res.render(Text::Html(format!(
+        r#"
+            <!DOCTYPE html>
+            <html>
+                <head> 
+                    <title>updown</title>
+                    <script src="https://cdn.tailwindcss.com"></script>
+                </head>
+                <body> 
+                    <div id="main"></div> 
+                </body>
+                {}
+            </html>
+        "#,
+        liveview_js
+    )));
     Ok(())
 }
 
@@ -103,10 +86,16 @@ fn Root(cx: Scope<RootProps>) -> Element {
         count -= 1;
     };
     cx.render(rsx! {
-        h1 { "count: {count}" }
-        h2 { "this was added with hot reloading" }
-        button { onclick: inc, "inc"  }
-        button { onclick: dec, "dec"  }
+        div {
+            class: "flex flex-col gap-4",
+            h1 { "count: {count}" }
+            div {
+                class: "flex gap-2",
+                button { class: "bg-sky-500 w-12 rounded-lg", onclick: inc, "inc"  }
+                button { class: "bg-sky-500 w-12 rounded-lg", onclick: dec, "dec"  }
+
+            }
+        }
     })
 }
 
