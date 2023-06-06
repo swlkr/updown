@@ -3,6 +3,7 @@
 use anyhow::Result;
 use dioxus::prelude::*;
 use dioxus_liveview::LiveViewPool;
+use nanoid::nanoid;
 use salvo::{
     affix, handler,
     hyper::header::ORIGIN,
@@ -11,20 +12,141 @@ use salvo::{
     ws::WebSocketUpgrade,
     Depot, Request, Response, Router, Server,
 };
-use std::{net::SocketAddr, sync::Arc};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
+    SqlitePool,
+};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     hot_reload_init!();
-    let addr: SocketAddr = "127.0.0.1:9001"
-        .parse()
-        .expect("Expected a string in the form of <ip address>:<port>");
+    ENV.set(Env::new()).unwrap();
+    DB.set(Database::new(env().database_url.clone()).await)
+        .unwrap();
+    db().migrate().await.expect("migrations failed to run");
+    let addr: SocketAddr = env().host.parse()?;
 
     println!("Listening on {}", addr);
 
     Server::new(TcpListener::bind(addr)).serve(routes()).await;
 
     return Ok(());
+}
+
+static ENV: OnceLock<Env> = OnceLock::new();
+static DB: OnceLock<Database> = OnceLock::new();
+
+#[derive(Debug)]
+enum AppError {
+    MigrateError(sqlx::migrate::MigrateError),
+    InsertUser(sqlx::Error),
+}
+
+#[derive(Debug)]
+struct Env {
+    pub database_url: String,
+    pub host: String,
+    pub origin: String,
+    pub ws_host: String,
+    pub app_env: String,
+}
+
+impl Env {
+    fn new() -> Self {
+        let database_url = std::env::var("DATABASE_URL").unwrap();
+        let host = std::env::var("HOST").unwrap();
+        let origin = std::env::var("ORIGIN").unwrap();
+        let ws_host = std::env::var("WS_HOST").unwrap();
+        let app_env = std::env::var("APP_ENV").unwrap();
+        Self {
+            database_url,
+            host,
+            origin,
+            ws_host,
+            app_env,
+        }
+    }
+}
+
+fn env() -> &'static Env {
+    ENV.get().expect("env is not initialized")
+}
+
+fn db() -> &'static Database {
+    DB.get().expect("db is not initialized")
+}
+
+#[derive(Debug)]
+struct Database {
+    connection: SqlitePool,
+}
+
+impl Database {
+    async fn new(filename: String) -> Self {
+        Self {
+            connection: Self::pool(&filename).await,
+        }
+    }
+
+    async fn migrate(&self) -> Result<(), AppError> {
+        sqlx::migrate!()
+            .run(&self.connection)
+            .await
+            .map_err(|e| AppError::MigrateError(e))
+    }
+
+    fn connection_options(filename: &str) -> SqliteConnectOptions {
+        let options: SqliteConnectOptions = filename.parse().unwrap();
+        options
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(30))
+    }
+
+    async fn pool(filename: &str) -> SqlitePool {
+        SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(Self::connection_options(filename))
+            .await
+            .unwrap()
+    }
+
+    async fn insert_user(&self) -> Result<User, AppError> {
+        let login_code = nanoid!();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("unable to get epoch in insert_user")
+            .as_secs_f64();
+        sqlx::query_as!(
+            User,
+            "insert into users (login_code, created_at, updated_at) values (?, ?, ?) returning *",
+            login_code,
+            now,
+            now
+        )
+        .fetch_one(&self.connection)
+        .await
+        .map_err(|e| AppError::InsertUser(e))
+    }
+}
+
+#[derive(Clone)]
+struct User {
+    id: i64,
+    login_code: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct Site {
+    url: String,
 }
 
 fn at(path: &str) -> salvo::Router {
@@ -42,8 +164,8 @@ fn routes() -> Router {
 
 #[handler]
 fn index(res: &mut Response) -> Result<()> {
-    let ws_addr = "ws://localhost:9001/ws".to_string();
-    let liveview_js = dioxus_liveview::interpreter_glue(&ws_addr);
+    let ws_addr = &env().ws_host;
+    let liveview_js = dioxus_liveview::interpreter_glue(ws_addr);
     res.render(Text::Html(format!(
         r#"
             <!DOCTYPE html>
@@ -75,9 +197,9 @@ async fn liveview(
     depot: &mut Depot,
     res: &mut Response,
 ) -> Result<(), StatusError> {
-    let addr = "http://localhost:9001";
-    let origin = req.header::<String>(ORIGIN).unwrap_or_default();
-    if addr != origin {
+    let env_origin = &env().origin;
+    let origin = &req.header::<String>(ORIGIN).unwrap_or_default();
+    if env_origin != origin {
         return Err(StatusError::not_found());
     }
     let view = depot
@@ -97,17 +219,12 @@ async fn liveview(
         .await
 }
 
-#[derive(Clone, PartialEq)]
-struct Site {
-    url: String,
-}
-
 #[derive(Props, PartialEq)]
 struct RootProps {}
 
 fn Root(cx: Scope<RootProps>) -> Element {
     let sites: &UseState<Vec<Site>> = use_state(cx, || vec![]);
-    let onsubmit = move |event: FormEvent| {
+    let onadd = move |event: FormEvent| {
         cx.spawn({
             to_owned![sites];
             async move {
@@ -127,21 +244,18 @@ fn Root(cx: Scope<RootProps>) -> Element {
         div {
             class: "flex items-center justify-center h-full px-4 md:px-0",
             div {
-                class: "flex flex-col max-w-sm w-full gap-16",
+                class: "flex flex-col max-w-md w-full gap-16",
                 div {
                     h1 { class: "text-4xl text-center", "updown" }
                     h2 { class: "text-xl text-center", "your friendly neighborhood uptime monitor" }
                 }
-                form {
-                    onsubmit: onsubmit,
-                    class: "flex flex-col gap-2 w-full",
-                    TextInput { name: "url", placeholder: "https://example.com" }
-                    Button { "Monitor a site" }
+                AddSite {
+                    onadd: onadd
                 }
                 div {
                     class: "flex flex-col gap-4",
                     sites.get().iter().map(|site| rsx! {
-                        SiteComponent {
+                        ShowSite {
                             key: "{site.url}",
                             site: site
                         }
@@ -152,13 +266,29 @@ fn Root(cx: Scope<RootProps>) -> Element {
     })
 }
 
+#[derive(Props)]
+struct AddSiteProps<'a> {
+    onadd: EventHandler<'a, FormEvent>,
+}
+
+fn AddSite<'a>(cx: Scope<'a, AddSiteProps<'a>>) -> Element {
+    cx.render(rsx! {
+        form {
+            onsubmit: move |event| cx.props.onadd.call(event),
+            class: "flex flex-col gap-2 w-full",
+            TextInput { name: "url", placeholder: "https://example.com" }
+            Button { "Monitor a site" }
+        }
+    })
+}
+
 #[derive(Props, PartialEq)]
-struct SiteComponentProps<'a> {
+struct ShowSiteProps<'a> {
     site: &'a Site,
 }
 
-fn SiteComponent<'a>(cx: Scope<'a, SiteComponentProps<'a>>) -> Element<'a> {
-    let SiteComponentProps { site } = cx.props;
+fn ShowSite<'a>(cx: Scope<'a, ShowSiteProps<'a>>) -> Element<'a> {
+    let ShowSiteProps { site } = cx.props;
     let Site { url } = site;
     cx.render(rsx! {
         div {
