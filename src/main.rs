@@ -49,6 +49,8 @@ fn index(res: &mut Response) -> Result<()> {
             <!DOCTYPE html>
             <html lang=en class="h-full">
                 <head>
+                    <meta charset="utf-8">
+                    <meta content="width=device-width, initial-scale=1" name="viewport">
                     <title>updown</title>
                     <script src="https://cdn.tailwindcss.com"></script>
                     <style>
@@ -56,7 +58,7 @@ fn index(res: &mut Response) -> Result<()> {
                         .hover\:box-shadow-xs:hover {{ box-shadow: 0 4px var(--tw-shadow-color); }}
                     </style>
                 </head>
-                <body class="h-full">
+                <body class="h-full dark:bg-gray-950 bg-gray-50 dark:text-white text-gray-900">
                     <div id="main" class="h-full"></div>
                 </body>
                 {}
@@ -123,7 +125,7 @@ fn Root(cx: Scope<RootProps>) -> Element {
     };
     cx.render(rsx! {
         div {
-            class: "flex items-center justify-center h-full dark:bg-gray-950 bg-gray-50 dark:text-white text-gray-900 px-4 md:px-0",
+            class: "flex items-center justify-center h-full px-4 md:px-0",
             div {
                 class: "flex flex-col max-w-sm w-full gap-16",
                 div {
