@@ -1,5 +1,5 @@
 create table if not exists sites (
-    id integer primary key,
+    id integer not null primary key,
     name text,
     url text not null unique,
     updated_at integer not null,

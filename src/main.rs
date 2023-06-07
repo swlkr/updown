@@ -8,7 +8,7 @@ use salvo::{
     affix, handler,
     http::cookie::SameSite,
     hyper::header::ORIGIN,
-    prelude::{StatusError, TcpListener},
+    prelude::{StatusCode, StatusError, TcpListener},
     session::{CookieStore, SessionDepotExt, SessionHandler},
     writer::{Json, Text},
     ws::WebSocketUpgrade,
@@ -28,7 +28,7 @@ use std::{
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
-    hot_reload_init!();
+    // hot_reload_init!();
     ENV.set(Env::new()).unwrap();
     DB.set(Database::new(env().database_url.clone()).await)
         .unwrap();
@@ -45,10 +45,14 @@ async fn main() -> Result<()> {
 static ENV: OnceLock<Env> = OnceLock::new();
 static DB: OnceLock<Database> = OnceLock::new();
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
 enum AppError {
-    MigrateError(sqlx::migrate::MigrateError),
-    InsertUser(sqlx::Error),
+    Migrate,
+    DatabaseInsert,
+    Login,
+    JsonParse,
+    DatabaseSelect,
 }
 
 #[derive(Debug)]
@@ -104,7 +108,7 @@ impl Database {
         sqlx::migrate!()
             .run(&self.connection)
             .await
-            .map_err(|e| AppError::MigrateError(e))
+            .map_err(|_| AppError::Migrate)
     }
 
     fn connection_options(filename: &str) -> SqliteConnectOptions {
@@ -124,12 +128,16 @@ impl Database {
             .unwrap()
     }
 
-    async fn insert_user(&self) -> Result<User, AppError> {
-        let login_code = nanoid!();
-        let now = SystemTime::now()
+    fn now() -> f64 {
+        SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("unable to get epoch in insert_user")
-            .as_secs_f64();
+            .as_secs_f64()
+    }
+
+    async fn insert_user(&self) -> Result<User, AppError> {
+        let login_code = nanoid!();
+        let now = Self::now();
         sqlx::query_as!(
             User,
             "insert into users (login_code, created_at, updated_at) values (?, ?, ?) returning *",
@@ -139,7 +147,7 @@ impl Database {
         )
         .fetch_one(&self.connection)
         .await
-        .map_err(|e| AppError::InsertUser(e))
+        .map_err(|_| AppError::DatabaseInsert)
     }
 
     pub async fn user_by_id(&self, id: i64) -> Result<User, sqlx::Error> {
@@ -151,16 +159,24 @@ impl Database {
     pub async fn user_by_login_code(&self, login_code: String) -> Result<User, sqlx::Error> {
         sqlx::query_as!(
             User,
-            "select id as 'id!', login_code, created_at, updated_at from users where login_code = ? limit 1",
+            "select * from users where login_code = ? limit 1",
             login_code
         )
         .fetch_one(&self.connection)
         .await
     }
 
-    // pub async fn insert_login(&self, user: User) -> Result<Login, sqlx::Error> {
-    //     sqlx::query_as!(Login, "insert into logins (user_id, created_at) values (?, ?) returning *").fetch_one(&self.connection).await
-    // }
+    pub async fn insert_login(&self, user: User) -> Result<Login, sqlx::Error> {
+        let now = Self::now();
+        sqlx::query_as!(
+            Login,
+            "insert into logins (user_id, created_at) values (?, ?) returning *",
+            user.id,
+            now
+        )
+        .fetch_one(&self.connection)
+        .await
+    }
 
     // async fn hide_login_code_flash(&self, user: User) -> Result<User, sqlx::Error> {
     //     sqlx::query_as!(
@@ -180,6 +196,13 @@ struct User {
     login_code: String,
     created_at: i64,
     updated_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, FromRow, Debug)]
+struct Login {
+    id: i64,
+    user_id: i64,
+    created_at: i64,
 }
 
 #[derive(Clone, PartialEq)]
@@ -216,15 +239,37 @@ struct LoginParams {
 }
 
 #[handler]
-async fn login(depot: &mut Depot, req: &mut Request) -> Result<Json<User>> {
-    let LoginParams { login_code } = req.parse_json::<LoginParams>().await?;
-    let user = db().user_by_login_code(login_code.clone()).await?;
-    if let Some(session) = depot.session_mut() {
-        session
-            .insert("user_id", user.id)
-            .expect("could not set user id in session");
+async fn login(depot: &mut Depot, req: &mut Request, res: &mut Response) -> Result<()> {
+    if let Ok(login_params) = req.parse_json::<LoginParams>().await {
+        if let Ok(user) = db()
+            .user_by_login_code(login_params.login_code.clone())
+            .await
+        {
+            if let Some(session) = depot.session_mut() {
+                session
+                    .insert("user_id", user.id)
+                    .expect("could not set user id in session");
+                tracing::info!("inserted into session");
+                match db().insert_login(user).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::info!("{:?}", e);
+                    }
+                };
+                res.render(Json(User::default()));
+            } else {
+                res.set_status_code(StatusCode::UNAUTHORIZED);
+                res.render(Json(AppError::Login));
+            }
+        } else {
+            res.set_status_code(StatusCode::UNAUTHORIZED);
+            res.render(Json(AppError::Login));
+        }
+    } else {
+        res.set_status_code(StatusCode::UNAUTHORIZED);
+        res.render(Json(AppError::Login));
     }
-    Ok(Json(User::default()))
+    Ok(())
 }
 
 #[handler]
@@ -279,8 +324,11 @@ async fn index(res: &mut Response) -> Result<()> {
                                 }},
                                 body: JSON.stringify({{ login_code: login_code }})
                             }});
-                            const _ = await response.json();
-                            window.location.reload();
+                            try {{
+                                await response.json();
+                                window.location.reload();
+                            }} catch(error) {{
+                            }}
                         }}
 
                         async function logout() {{
@@ -290,8 +338,10 @@ async fn index(res: &mut Response) -> Result<()> {
                                     "Content-Type": "application/json"
                                 }}
                             }});
-                            const _ = await response.json();
-                            window.location.reload();
+                            try {{
+                                await response.json();
+                                window.location.reload();
+                            }} catch(error) {{}}
                         }}
 
                         document.addEventListener("click", (event) => {{
@@ -396,7 +446,7 @@ fn Root(cx: Scope<RootProps>) -> Element {
                     }
                 },
                 View::Login => rsx! {
-                    Login {}
+                    NewLogin {}
                 },
                 View::Account => rsx! {
                     Account {}
@@ -407,7 +457,7 @@ fn Root(cx: Scope<RootProps>) -> Element {
     })
 }
 
-fn Login(cx: Scope) -> Element {
+fn NewLogin(cx: Scope) -> Element {
     cx.render(rsx! {
         div {
             class: "flex flex-col gap-2",
@@ -525,7 +575,6 @@ fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element {
                 } else {
                     rsx! {
                         li { class: "cursor-pointer", onclick: move |_| cx.props.onclick.call(View::Login), "Login" }
-                        li { class: "cursor-pointer", "Sign up" }
                     }
                 }
             }
