@@ -17,7 +17,7 @@ use salvo::{
 use serde::{Deserialize, Serialize};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
-    SqlitePool,
+    FromRow, SqlitePool,
 };
 use std::{
     net::SocketAddr,
@@ -27,6 +27,7 @@ use std::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt().init();
     hot_reload_init!();
     ENV.set(Env::new()).unwrap();
     DB.set(Database::new(env().database_url.clone()).await)
@@ -146,9 +147,34 @@ impl Database {
             .fetch_one(&self.connection)
             .await
     }
+
+    pub async fn user_by_login_code(&self, login_code: String) -> Result<User, sqlx::Error> {
+        sqlx::query_as!(
+            User,
+            "select id as 'id!', login_code, created_at, updated_at from users where login_code = ? limit 1",
+            login_code
+        )
+        .fetch_one(&self.connection)
+        .await
+    }
+
+    // pub async fn insert_login(&self, user: User) -> Result<Login, sqlx::Error> {
+    //     sqlx::query_as!(Login, "insert into logins (user_id, created_at) values (?, ?) returning *").fetch_one(&self.connection).await
+    // }
+
+    // async fn hide_login_code_flash(&self, user: User) -> Result<User, sqlx::Error> {
+    //     sqlx::query_as!(
+    //         User,
+    //         "update users set login_code_hidden = ? where id = ?",
+    //         true,
+    //         user.id
+    //     )
+    //     .fetch_one(&self.connection)
+    //     .await
+    // }
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, FromRow, Debug)]
 struct User {
     id: i64,
     login_code: String,
@@ -179,19 +205,24 @@ fn routes() -> Router {
         .hoop(set_current_user_handler)
         .hoop(affix::inject(arc_view))
         .get(index)
-        .push(at("/signup").post(signup))
+        .push(at("/login").post(login))
         .push(at("/logout").post(logout))
         .push(at("/ws").get(liveview))
 }
 
+#[derive(Serialize, Deserialize)]
+struct LoginParams {
+    login_code: String,
+}
+
 #[handler]
-async fn signup(depot: &mut Depot) -> Result<Json<User>> {
-    if let Ok(user) = db().insert_user().await {
-        if let Some(session) = depot.session_mut() {
-            session
-                .insert("user_id", user.id)
-                .expect("could not set user id in session");
-        }
+async fn login(depot: &mut Depot, req: &mut Request) -> Result<Json<User>> {
+    let LoginParams { login_code } = req.parse_json::<LoginParams>().await?;
+    let user = db().user_by_login_code(login_code.clone()).await?;
+    if let Some(session) = depot.session_mut() {
+        session
+            .insert("user_id", user.id)
+            .expect("could not set user id in session");
     }
     Ok(Json(User::default()))
 }
@@ -239,12 +270,14 @@ async fn index(res: &mut Response) -> Result<()> {
                 <body class="h-full dark:bg-gray-950 bg-gray-50 dark:text-white text-gray-900">
                     <div id="main" class="h-full"></div>
                     <script>
-                        async function signup() {{
-                            const response = await fetch("/signup", {{
+                        async function login(login_code) {{
+                            const response = await fetch("/login", {{
                                 method: "POST",
                                 headers: {{
+                                    "Accept": "application/json",
                                     "Content-Type": "application/json"
-                                }}
+                                }},
+                                body: JSON.stringify({{ login_code: login_code }})
                             }});
                             const _ = await response.json();
                             window.location.reload();
@@ -262,8 +295,9 @@ async fn index(res: &mut Response) -> Result<()> {
                         }}
 
                         document.addEventListener("click", (event) => {{
-                            if(event.target.id === "signup-btn") {{
-                                signup().then(x => x);
+                            if(event.target.id === "login-btn") {{
+                                const login_code = document.querySelector('input[name="login-code"]').value;
+                                login(login_code).then(x => x);
                             }}
                             if(event.target.id === "logout-btn") {{
                                 logout().then(x => x);
@@ -335,52 +369,34 @@ fn Root(cx: Scope<RootProps>) -> Element {
             }
         })
     };
-    let view = use_state(cx, || View::default());
+    let initial_view = match current_user {
+        Some(_) => View::Monitors,
+        None => View::default(),
+    };
+    let view = use_state(cx, || initial_view);
     let onnav = move |new_view| {
         to_owned![view];
         view.set(new_view);
     };
-    let login_code = match current_user {
-        Some(u) => u.login_code.clone(),
-        None => String::default(),
-    };
-    let logged_in = current_user.is_some();
     cx.render(rsx! {
         div {
-            class: "flex flex-col justify-center items-center pt-16 px-4 md:px-0 max-w-md gap-16",
+            class: "flex flex-col justify-center items-center pt-16 px-4 md:px-0 max-w-md mx-auto gap-16",
+            Header {}
             match view.get() {
-                View::Home => rsx! {
-                    div {
-                        h1 { class: "text-4xl text-center", "updown" }
-                        h2 { class: "text-xl text-center", "your friendly neighborhood uptime monitor" }
-                    }
-                    if logged_in {
-                        rsx! {
-
-                            div {
-                                class: "bg-blue-50 p-4 rounded-md text-blue-500",
-                                p { "This is your login code. If you lose it you will not be able to log back in." }
-                                div { class: "font-bold text-2xl", login_code }
-                            }
-                            AddSite { onadd: onadd }
-                        }
-                    } else {
-                        rsx! {
-                            Cta {}
-                        }
-                    }
-                    div {
-                        class: "flex flex-col gap-4",
-                        sites.get().iter().map(|site| rsx! {
-                            ShowSite {
-                                key: "{site.url}",
-                                site: site
-                            }
-                        })
-                    }
+                View::Lander => rsx! {
+                    Lander { onclick: move |_| { to_owned![view]; view.set(View::NewAccount); } }
+                },
+                View::NewAccount => rsx! {
+                    NewAccount {}
                 },
                 View::Monitors => rsx! {
-                    div { "monitors" }
+                    Monitors {
+                        onadd: onadd,
+                        sites: sites.get(),
+                    }
+                },
+                View::Login => rsx! {
+                    Login {}
                 },
                 View::Account => rsx! {
                     Account {}
@@ -391,18 +407,97 @@ fn Root(cx: Scope<RootProps>) -> Element {
     })
 }
 
-fn Cta(cx: Scope) -> Element {
+fn Login(cx: Scope) -> Element {
     cx.render(rsx! {
-        Button { id: "signup-btn", "Sign up and start monitoring" }
+        div {
+            class: "flex flex-col gap-2",
+            TextInput { name: "login-code" }
+            Button { id: "login-btn", "Login" }
+        }
     })
 }
 
-#[derive(Default)]
+#[inline_props]
+fn Monitors<'a>(cx: Scope, onadd: EventHandler<'a, FormEvent>, sites: &'a Vec<Site>) -> Element {
+    cx.render(rsx! {
+        AddSite { onadd: move |e| onadd.call(e) }
+        div {
+            class: "flex flex-col gap-4",
+            sites.iter().map(|site| rsx! {
+                ShowSite {
+                    key: "{site.url}",
+                    site: site
+                }
+            })
+        }
+    })
+}
+
+fn Header(cx: Scope) -> Element {
+    cx.render(rsx! {
+        div {
+            h1 { class: "text-4xl text-center", "updown" }
+            h2 { class: "text-xl text-center", "your friendly neighborhood uptime monitor" }
+        }
+    })
+}
+
+#[inline_props]
+fn Lander<'a>(cx: Scope, onclick: EventHandler<'a, MouseEvent>) -> Element {
+    cx.render(rsx! {
+        Button { onclick: move |e| onclick.call(e), "Sign up and start monitoring" }
+    })
+}
+
+fn NewAccount(cx: Scope) -> Element {
+    let login_code = use_state(cx, || None);
+    let onclick = move |_| {
+        cx.spawn({
+            to_owned![login_code];
+            async move {
+                if let Ok(user) = db().insert_user().await {
+                    login_code.set(Some(user.login_code.clone()));
+                }
+            }
+        })
+    };
+    cx.render(rsx! {
+        div {
+            h1 { class: "text-2xl text-center", "Get a login code", }
+            match login_code.get() {
+                Some(c) => {
+                    rsx! {
+                        div {
+                            class: "flex flex-col gap-6",
+                            p { "Congrats! Here's your login code" }
+                            h1 { class: "text-2xl font-bold", "{c}" }
+                            LoginCodeAlert { login_code: String::default() }
+                            input { r#type: "hidden", name: "login-code", value: "{c}" }
+                            Button { id: "login-btn", "Add a site to monitor" }
+                        }
+                    }
+                },
+                None => {
+                    rsx! {
+                        Button {
+                            onclick: onclick,
+                            "Generate login code"
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[derive(Default, Clone)]
 enum View {
     #[default]
-    Home,
+    Lander,
+    NewAccount,
     Monitors,
     Account,
+    Login,
 }
 
 #[derive(Props)]
@@ -411,24 +506,26 @@ struct NavProps<'a> {
 }
 
 fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element {
-    let NavProps { onclick } = cx.props;
     let ss = use_shared_state::<RootProps>(cx).unwrap();
     let logged_in = ss.read().current_user.is_some();
+    let default_view = match logged_in {
+        true => View::Monitors,
+        false => View::Lander,
+    };
     cx.render(rsx! {
         nav {
             class: "fixed bottom-0 w-full py-8",
             ul {
                 class: "flex justify-around",
-                li { onclick: move |_| onclick.call(View::Home), "Home" }
+                li { class: "cursor-pointer", onclick: move |_| { cx.props.onclick.call(default_view.to_owned()) }, "Home" }
                 if logged_in {
                     rsx! {
-                        li { onclick: move |_| onclick.call(View::Monitors), "Monitors"  }
-                        li { onclick: move |_| onclick.call(View::Account), "Account"  }
+                        li { class: "cursor-pointer", onclick: move |_| cx.props.onclick.call(View::Account), "Account"  }
                     }
                 } else {
                     rsx! {
-                        li { "Login" }
-                        li { "Sign up" }
+                        li { class: "cursor-pointer", onclick: move |_| cx.props.onclick.call(View::Login), "Login" }
+                        li { class: "cursor-pointer", "Sign up" }
                     }
                 }
             }
@@ -530,11 +627,30 @@ fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
     })
 }
 
+fn current_user(cx: Scope) -> User {
+    let ss = use_shared_state::<RootProps>(cx).unwrap();
+    ss.read().current_user.clone().unwrap()
+}
+
 fn Account(cx: Scope) -> Element {
+    let User { login_code, .. } = current_user(cx);
     cx.render(rsx! {
         div {
-            class: "grid place-content-center",
+            class: "grid place-content-center gap-4",
+            LoginCodeAlert { login_code: login_code }
             Button { id: "logout-btn", "Logout" }
+        }
+    })
+}
+
+#[inline_props]
+fn LoginCodeAlert(cx: Scope, login_code: String) -> Element {
+    cx.render(rsx! {
+        div {
+            class: "bg-blue-50 p-4 rounded-md text-blue-500 flex flex-col gap-1",
+            p { "This is the only identifier you need to use updown." }
+            p { "No email, no username. Just simplicity." }
+            div { class: "font-bold text-2xl", "{login_code}" }
         }
     })
 }
