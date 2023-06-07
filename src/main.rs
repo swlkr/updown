@@ -27,19 +27,16 @@ use std::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().init();
     // hot_reload_init!();
     ENV.set(Env::new()).unwrap();
     DB.set(Database::new(env().database_url.clone()).await)
         .unwrap();
     db().migrate().await.expect("migrations failed to run");
+    tracing_subscriber::fmt().init();
     let addr: SocketAddr = env().host.parse()?;
-
     println!("Listening on {}", addr);
-
     Server::new(TcpListener::bind(addr)).serve(routes()).await;
-
-    return Ok(());
+    Ok(())
 }
 
 static ENV: OnceLock<Env> = OnceLock::new();
@@ -430,7 +427,7 @@ fn Root(cx: Scope<RootProps>) -> Element {
     };
     cx.render(rsx! {
         div {
-            class: "flex flex-col justify-center items-center pt-16 px-4 md:px-0 max-w-md mx-auto gap-16",
+            class: "flex flex-col justify-center items-center pt-16 lg:pt-32 px-4 md:px-0 max-w-md mx-auto gap-16",
             Header {}
             match view.get() {
                 View::Lander => rsx! {
@@ -540,7 +537,7 @@ fn NewAccount(cx: Scope) -> Element {
     })
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 enum View {
     #[default]
     Lander,
@@ -550,12 +547,8 @@ enum View {
     Login,
 }
 
-#[derive(Props)]
-struct NavProps<'a> {
-    onclick: EventHandler<'a, View>,
-}
-
-fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element {
+#[inline_props]
+fn Nav<'a>(cx: Scope, onclick: EventHandler<'a, View>) -> Element {
     let ss = use_shared_state::<RootProps>(cx).unwrap();
     let logged_in = ss.read().current_user.is_some();
     let default_view = match logged_in {
@@ -564,17 +557,17 @@ fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element {
     };
     cx.render(rsx! {
         nav {
-            class: "fixed bottom-0 w-full py-8",
+            class: "fixed lg lg:top-0 lg:bottom-auto bottom-0 w-full py-8",
             ul {
-                class: "flex justify-around",
-                li { class: "cursor-pointer", onclick: move |_| { cx.props.onclick.call(default_view.to_owned()) }, "Home" }
+                class: "flex lg:justify-center lg:gap-4 justify-around",
+                NavLink { onclick: move |_| onclick.call(default_view.clone()), "Home" }
                 if logged_in {
                     rsx! {
-                        li { class: "cursor-pointer", onclick: move |_| cx.props.onclick.call(View::Account), "Account"  }
+                        NavLink { onclick: move |_| onclick.call(View::Account), "Account" }
                     }
                 } else {
                     rsx! {
-                        li { class: "cursor-pointer", onclick: move |_| cx.props.onclick.call(View::Login), "Login" }
+                        NavLink { onclick: move |_| onclick.call(View::Login), "Login" }
                     }
                 }
             }
@@ -582,15 +575,22 @@ fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element {
     })
 }
 
-#[derive(Props)]
-struct AddSiteProps<'a> {
-    onadd: EventHandler<'a, FormEvent>,
+#[inline_props]
+fn NavLink<'a>(cx: Scope, onclick: EventHandler<'a, ()>, children: Element<'a>) -> Element {
+    cx.render(rsx! {
+        li {
+            class: "cursor-pointer group transition duration-300",
+            a { onclick: move |_| onclick.call(()), children }
+            div { class: "max-w-0 group-hover:max-w-full transition-all duration-300 h-1 bg-cyan-400" }
+        }
+    })
 }
 
-fn AddSite<'a>(cx: Scope<'a, AddSiteProps<'a>>) -> Element {
+#[inline_props]
+fn AddSite<'a>(cx: Scope, onadd: EventHandler<'a, FormEvent>) -> Element {
     cx.render(rsx! {
         form {
-            onsubmit: move |event| cx.props.onadd.call(event),
+            onsubmit: move |event| onadd.call(event),
             class: "flex flex-col gap-2 w-full",
             TextInput { name: "url", placeholder: "https://example.com" }
             Button { "Monitor a site" }
