@@ -6,12 +6,15 @@ use dioxus_liveview::LiveViewPool;
 use nanoid::nanoid;
 use salvo::{
     affix, handler,
+    http::cookie::SameSite,
     hyper::header::ORIGIN,
     prelude::{StatusError, TcpListener},
-    writer::Text,
+    session::{CookieStore, SessionDepotExt, SessionHandler},
+    writer::{Json, Text},
     ws::WebSocketUpgrade,
     Depot, Request, Response, Router, Server,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     SqlitePool,
@@ -54,6 +57,7 @@ struct Env {
     pub origin: String,
     pub ws_host: String,
     pub app_env: String,
+    pub session_key: String,
 }
 
 impl Env {
@@ -63,12 +67,14 @@ impl Env {
         let origin = std::env::var("ORIGIN").unwrap();
         let ws_host = std::env::var("WS_HOST").unwrap();
         let app_env = std::env::var("APP_ENV").unwrap();
+        let session_key = std::env::var("SESSION_KEY").unwrap();
         Self {
             database_url,
             host,
             origin,
             ws_host,
             app_env,
+            session_key,
         }
     }
 }
@@ -134,9 +140,15 @@ impl Database {
         .await
         .map_err(|e| AppError::InsertUser(e))
     }
+
+    pub async fn user_by_id(&self, id: i64) -> Result<User, sqlx::Error> {
+        sqlx::query_as!(User, "select * from users where id = ?", id)
+            .fetch_one(&self.connection)
+            .await
+    }
 }
 
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 struct User {
     id: i64,
     login_code: String,
@@ -154,16 +166,60 @@ fn at(path: &str) -> salvo::Router {
 }
 
 fn routes() -> Router {
+    let session_key = &env().session_key;
+    let session_handler = SessionHandler::builder(CookieStore::new(), &session_key.as_bytes())
+        .cookie_name("id")
+        .same_site_policy(SameSite::Strict)
+        .build()
+        .unwrap();
     let view = LiveViewPool::new();
     let arc_view = Arc::new(view);
     Router::new()
+        .hoop(session_handler)
+        .hoop(set_current_user_handler)
         .hoop(affix::inject(arc_view))
         .get(index)
+        .push(at("/signup").post(signup))
+        .push(at("/logout").post(logout))
         .push(at("/ws").get(liveview))
 }
 
 #[handler]
-fn index(res: &mut Response) -> Result<()> {
+async fn signup(depot: &mut Depot) -> Result<Json<User>> {
+    if let Ok(user) = db().insert_user().await {
+        if let Some(session) = depot.session_mut() {
+            session
+                .insert("user_id", user.id)
+                .expect("could not set user id in session");
+        }
+    }
+    Ok(Json(User::default()))
+}
+
+#[handler]
+async fn logout(depot: &mut Depot) -> Result<Json<User>> {
+    if let Some(session) = depot.session_mut() {
+        if let Some(user_id) = session.get::<i64>("user_id") {
+            if let Some(_) = db().user_by_id(user_id).await.ok() {
+                session.remove("user_id");
+            }
+        }
+    }
+    Ok(Json(User::default()))
+}
+
+#[handler]
+async fn set_current_user_handler(depot: &mut Depot) {
+    let maybe_id: Option<i64> = depot.session().unwrap().get("user_id");
+    if let Some(id) = maybe_id {
+        if let Ok(user) = db().user_by_id(id).await {
+            depot.inject(user);
+        }
+    }
+}
+
+#[handler]
+async fn index(res: &mut Response) -> Result<()> {
     let ws_addr = &env().ws_host;
     let liveview_js = dioxus_liveview::interpreter_glue(ws_addr);
     res.render(Text::Html(format!(
@@ -182,6 +238,38 @@ fn index(res: &mut Response) -> Result<()> {
                 </head>
                 <body class="h-full dark:bg-gray-950 bg-gray-50 dark:text-white text-gray-900">
                     <div id="main" class="h-full"></div>
+                    <script>
+                        async function signup() {{
+                            const response = await fetch("/signup", {{
+                                method: "POST",
+                                headers: {{
+                                    "Content-Type": "application/json"
+                                }}
+                            }});
+                            const _ = await response.json();
+                            window.location.reload();
+                        }}
+
+                        async function logout() {{
+                            const response = await fetch("/logout", {{
+                                method: "POST",
+                                headers: {{
+                                    "Content-Type": "application/json"
+                                }}
+                            }});
+                            const _ = await response.json();
+                            window.location.reload();
+                        }}
+
+                        document.addEventListener("click", (event) => {{
+                            if(event.target.id === "signup-btn") {{
+                                signup().then(x => x);
+                            }}
+                            if(event.target.id === "logout-btn") {{
+                                logout().then(x => x);
+                            }}
+                        }});
+                    </script>
                 </body>
                 {}
             </html>
@@ -206,13 +294,14 @@ async fn liveview(
         .obtain::<Arc<LiveViewPool>>()
         .expect("LiveViewPool was not found in the middleware")
         .clone();
+    let current_user = depot.obtain::<User>().cloned();
     WebSocketUpgrade::new()
         .upgrade(req, res, |ws| async move {
             let _ = view
                 .launch_with_props::<RootProps>(
                     dioxus_liveview::salvo_socket(ws),
                     Root,
-                    RootProps {},
+                    RootProps { current_user },
                 )
                 .await;
         })
@@ -220,9 +309,15 @@ async fn liveview(
 }
 
 #[derive(Props, PartialEq)]
-struct RootProps {}
+struct RootProps {
+    current_user: Option<User>,
+}
 
 fn Root(cx: Scope<RootProps>) -> Element {
+    let RootProps { current_user } = cx.props;
+    use_shared_state_provider(cx, || RootProps {
+        current_user: cx.props.current_user.clone(),
+    });
     let sites: &UseState<Vec<Site>> = use_state(cx, || vec![]);
     let onadd = move |event: FormEvent| {
         cx.spawn({
@@ -240,26 +335,101 @@ fn Root(cx: Scope<RootProps>) -> Element {
             }
         })
     };
+    let view = use_state(cx, || View::default());
+    let onnav = move |new_view| {
+        to_owned![view];
+        view.set(new_view);
+    };
+    let login_code = match current_user {
+        Some(u) => u.login_code.clone(),
+        None => String::default(),
+    };
+    let logged_in = current_user.is_some();
     cx.render(rsx! {
         div {
-            class: "flex items-center justify-center h-full px-4 md:px-0",
-            div {
-                class: "flex flex-col max-w-md w-full gap-16",
-                div {
-                    h1 { class: "text-4xl text-center", "updown" }
-                    h2 { class: "text-xl text-center", "your friendly neighborhood uptime monitor" }
-                }
-                AddSite {
-                    onadd: onadd
-                }
-                div {
-                    class: "flex flex-col gap-4",
-                    sites.get().iter().map(|site| rsx! {
-                        ShowSite {
-                            key: "{site.url}",
-                            site: site
+            class: "flex flex-col justify-center items-center pt-16 px-4 md:px-0 max-w-md gap-16",
+            match view.get() {
+                View::Home => rsx! {
+                    div {
+                        h1 { class: "text-4xl text-center", "updown" }
+                        h2 { class: "text-xl text-center", "your friendly neighborhood uptime monitor" }
+                    }
+                    if logged_in {
+                        rsx! {
+
+                            div {
+                                class: "bg-blue-50 p-4 rounded-md text-blue-500",
+                                p { "This is your login code. If you lose it you will not be able to log back in." }
+                                div { class: "font-bold text-2xl", login_code }
+                            }
+                            AddSite { onadd: onadd }
                         }
-                    })
+                    } else {
+                        rsx! {
+                            Cta {}
+                        }
+                    }
+                    div {
+                        class: "flex flex-col gap-4",
+                        sites.get().iter().map(|site| rsx! {
+                            ShowSite {
+                                key: "{site.url}",
+                                site: site
+                            }
+                        })
+                    }
+                },
+                View::Monitors => rsx! {
+                    div { "monitors" }
+                },
+                View::Account => rsx! {
+                    Account {}
+                }
+            }
+        }
+        Nav { onclick: onnav }
+    })
+}
+
+fn Cta(cx: Scope) -> Element {
+    cx.render(rsx! {
+        Button { id: "signup-btn", "Sign up and start monitoring" }
+    })
+}
+
+#[derive(Default)]
+enum View {
+    #[default]
+    Home,
+    Monitors,
+    Account,
+}
+
+#[derive(Props)]
+struct NavProps<'a> {
+    onclick: EventHandler<'a, View>,
+}
+
+fn Nav<'a>(cx: Scope<'a, NavProps<'a>>) -> Element {
+    let NavProps { onclick } = cx.props;
+    let ss = use_shared_state::<RootProps>(cx).unwrap();
+    let logged_in = ss.read().current_user.is_some();
+    cx.render(rsx! {
+        nav {
+            class: "fixed bottom-0 w-full py-8",
+            ul {
+                class: "flex justify-around",
+                li { onclick: move |_| onclick.call(View::Home), "Home" }
+                if logged_in {
+                    rsx! {
+                        li { onclick: move |_| onclick.call(View::Monitors), "Monitors"  }
+                        li { onclick: move |_| onclick.call(View::Account), "Account"  }
+                    }
+                } else {
+                    rsx! {
+                        li { "Login" }
+                        li { "Sign up" }
+                    }
                 }
             }
         }
@@ -313,19 +483,27 @@ fn ShowSite<'a>(cx: Scope<'a, ShowSiteProps<'a>>) -> Element<'a> {
 #[derive(Props)]
 struct ButtonProps<'a> {
     #[props(optional)]
+    id: Option<&'a str>,
+    #[props(optional)]
     onclick: Option<EventHandler<'a, MouseEvent>>,
     children: Element<'a>,
 }
 
 fn Button<'a>(cx: Scope<'a, ButtonProps<'a>>) -> Element {
-    let ButtonProps { onclick, children } = cx.props;
+    let ButtonProps {
+        id,
+        onclick,
+        children,
+    } = cx.props;
     let onclick = move |event| {
         if let Some(click) = onclick {
             click.call(event);
         }
     };
+    let id = id.unwrap_or_default();
     cx.render(rsx! {
         button {
+            id: id,
             class: "bg-cyan-400 text-white px-2 py-3 rounded-3xl box-shadow-md shadow-cyan-600 hover:box-shadow-xs hover:top-0.5 active:shadow-none active:top-1 w-full relative",
             onclick: onclick,
             children
@@ -348,6 +526,15 @@ fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
             r#type: "text",
             name: "{name}",
             placeholder: placeholder.unwrap_or_default()
+        }
+    })
+}
+
+fn Account(cx: Scope) -> Element {
+    cx.render(rsx! {
+        div {
+            class: "grid place-content-center",
+            Button { id: "logout-btn", "Logout" }
         }
     })
 }
