@@ -376,13 +376,20 @@ async fn liveview(
         .expect("LiveViewPool was not found in the middleware")
         .clone();
     let current_user = depot.obtain::<User>().cloned();
+    let initial_view = match current_user {
+        Some(_) => View::Monitors,
+        None => View::Lander,
+    };
     WebSocketUpgrade::new()
         .upgrade(req, res, |ws| async move {
             let _ = view
                 .launch_with_props::<RootProps>(
                     dioxus_liveview::salvo_socket(ws),
                     Root,
-                    RootProps { current_user },
+                    RootProps {
+                        current_user,
+                        initial_view,
+                    },
                 )
                 .await;
         })
@@ -392,12 +399,17 @@ async fn liveview(
 #[derive(Props, PartialEq)]
 struct RootProps {
     current_user: Option<User>,
+    initial_view: View,
 }
 
 fn Root(cx: Scope<RootProps>) -> Element {
-    let RootProps { current_user } = cx.props;
+    let RootProps {
+        current_user,
+        initial_view,
+    } = cx.props;
     use_shared_state_provider(cx, || RootProps {
         current_user: cx.props.current_user.clone(),
+        initial_view: initial_view.clone(),
     });
     let sites: &UseState<Vec<Site>> = use_state(cx, || vec![]);
     let onadd = move |event: FormEvent| {
@@ -450,7 +462,7 @@ fn Root(cx: Scope<RootProps>) -> Element {
                 }
             }
         }
-        Nav { onclick: onnav }
+        Nav { onclick: onnav, active_view: view.get() }
     })
 }
 
@@ -548,7 +560,7 @@ enum View {
 }
 
 #[inline_props]
-fn Nav<'a>(cx: Scope, onclick: EventHandler<'a, View>) -> Element {
+fn Nav<'a>(cx: Scope, onclick: EventHandler<'a, View>, active_view: &'a View) -> Element {
     let ss = use_shared_state::<RootProps>(cx).unwrap();
     let logged_in = ss.read().current_user.is_some();
     let default_view = match logged_in {
@@ -560,14 +572,14 @@ fn Nav<'a>(cx: Scope, onclick: EventHandler<'a, View>) -> Element {
             class: "fixed lg lg:top-0 lg:bottom-auto bottom-0 w-full py-8",
             ul {
                 class: "flex lg:justify-center lg:gap-4 justify-around",
-                NavLink { onclick: move |_| onclick.call(default_view.clone()), "Home" }
+                NavLink { active: **active_view == default_view, onclick: move |_| onclick.call(default_view.clone()), "Home" }
                 if logged_in {
                     rsx! {
-                        NavLink { onclick: move |_| onclick.call(View::Account), "Account" }
+                        NavLink { active: **active_view == View::Account, onclick: move |_| onclick.call(View::Account), "Account" }
                     }
                 } else {
                     rsx! {
-                        NavLink { onclick: move |_| onclick.call(View::Login), "Login" }
+                        NavLink { active: **active_view == View::Login, onclick: move |_| onclick.call(View::Login), "Login" }
                     }
                 }
             }
@@ -576,11 +588,20 @@ fn Nav<'a>(cx: Scope, onclick: EventHandler<'a, View>) -> Element {
 }
 
 #[inline_props]
-fn NavLink<'a>(cx: Scope, onclick: EventHandler<'a, ()>, children: Element<'a>) -> Element {
+fn NavLink<'a>(
+    cx: Scope,
+    active: bool,
+    onclick: EventHandler<'a, ()>,
+    children: Element<'a>,
+) -> Element {
+    let active_class = match active {
+        true => "text-cyan-400",
+        false => "",
+    };
     cx.render(rsx! {
         li {
             class: "cursor-pointer group transition duration-300",
-            a { onclick: move |_| onclick.call(()), children }
+            a { class: "{active_class}", onclick: move |_| onclick.call(()), children }
             div { class: "max-w-0 group-hover:max-w-full transition-all duration-300 h-1 bg-cyan-400" }
         }
     })
