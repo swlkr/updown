@@ -3,7 +3,6 @@
 use anyhow::Result;
 use dioxus::prelude::*;
 use dioxus_liveview::LiveViewPool;
-use nanoid::nanoid;
 use salvo::{
     affix, handler,
     http::cookie::SameSite,
@@ -15,15 +14,11 @@ use salvo::{
     Depot, Request, Response, Router, Server,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
-    FromRow, SqlitePool,
-};
 use std::{
     net::SocketAddr,
     sync::{Arc, OnceLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use updown::{AppError, Database, Login, Site, User};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,7 +26,6 @@ async fn main() -> Result<()> {
     ENV.set(Env::new()).unwrap();
     DB.set(Database::new(env().database_url.clone()).await)
         .unwrap();
-    db().migrate().await.expect("migrations failed to run");
     tracing_subscriber::fmt().init();
     let addr: SocketAddr = env().host.parse()?;
     println!("Listening on {}", addr);
@@ -41,17 +35,6 @@ async fn main() -> Result<()> {
 
 static ENV: OnceLock<Env> = OnceLock::new();
 static DB: OnceLock<Database> = OnceLock::new();
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum AppError {
-    Migrate,
-    DatabaseInsert,
-    Login,
-    JsonParse,
-    DatabaseSelect,
-    UrlEmpty,
-}
 
 #[derive(Debug)]
 struct Env {
@@ -83,151 +66,8 @@ fn env() -> &'static Env {
     ENV.get().expect("env is not initialized")
 }
 
-fn db() -> &'static Database {
+pub fn db() -> &'static Database {
     DB.get().expect("db is not initialized")
-}
-
-#[derive(Debug)]
-struct Database {
-    connection: SqlitePool,
-}
-
-impl Database {
-    async fn new(filename: String) -> Self {
-        Self {
-            connection: Self::pool(&filename).await,
-        }
-    }
-
-    async fn migrate(&self) -> Result<(), AppError> {
-        sqlx::migrate!()
-            .run(&self.connection)
-            .await
-            .map_err(|_| AppError::Migrate)
-    }
-
-    fn connection_options(filename: &str) -> SqliteConnectOptions {
-        let options: SqliteConnectOptions = filename.parse().unwrap();
-        options
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal)
-            .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(Duration::from_secs(30))
-    }
-
-    async fn pool(filename: &str) -> SqlitePool {
-        SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(Self::connection_options(filename))
-            .await
-            .unwrap()
-    }
-
-    fn now() -> f64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("unable to get epoch in insert_user")
-            .as_secs_f64()
-    }
-
-    async fn insert_user(&self) -> Result<User, AppError> {
-        let login_code = nanoid!();
-        let now = Self::now();
-        sqlx::query_as!(
-            User,
-            "insert into users (login_code, created_at, updated_at) values (?, ?, ?) returning *",
-            login_code,
-            now,
-            now
-        )
-        .fetch_one(&self.connection)
-        .await
-        .map_err(|_| AppError::DatabaseInsert)
-    }
-
-    pub async fn user_by_id(&self, id: i64) -> Result<User, sqlx::Error> {
-        sqlx::query_as!(User, "select * from users where id = ?", id)
-            .fetch_one(&self.connection)
-            .await
-    }
-
-    pub async fn user_by_login_code(&self, login_code: String) -> Result<User, sqlx::Error> {
-        sqlx::query_as!(
-            User,
-            "select * from users where login_code = ? limit 1",
-            login_code
-        )
-        .fetch_one(&self.connection)
-        .await
-    }
-
-    pub async fn insert_login(&self, new_login: Login) -> Result<Login, sqlx::Error> {
-        let now = Self::now();
-        sqlx::query_as!(
-            Login,
-            "insert into logins (user_id, created_at) values (?, ?) returning *",
-            new_login.user_id,
-            now
-        )
-        .fetch_one(&self.connection)
-        .await
-    }
-
-    pub async fn insert_site(&self, site: Site) -> Result<Site, sqlx::Error> {
-        let now = Self::now();
-        sqlx::query_as!(
-            Site,
-            "insert into sites (url, user_id, created_at, updated_at) values (?, ?, ?, ?) returning *",
-            site.url,
-            site.user_id,
-            now,
-            now,
-        )
-        .fetch_one(&self.connection)
-        .await
-    }
-
-    async fn sites_by_user_id(&self, user_id: i64) -> Result<Vec<Site>, sqlx::Error> {
-        sqlx::query_as!(Site, "select * from sites where user_id = ?", user_id,)
-            .fetch_all(&self.connection)
-            .await
-    }
-
-    // async fn hide_login_code_flash(&self, user: User) -> Result<User, sqlx::Error> {
-    //     sqlx::query_as!(
-    //         User,
-    //         "update users set login_code_hidden = ? where id = ?",
-    //         true,
-    //         user.id
-    //     )
-    //     .fetch_one(&self.connection)
-    //     .await
-    // }
-}
-
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq, FromRow, Debug)]
-struct User {
-    id: i64,
-    login_code: String,
-    created_at: i64,
-    updated_at: i64,
-}
-
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq, FromRow, Debug)]
-struct Login {
-    id: i64,
-    user_id: i64,
-    created_at: i64,
-}
-
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq, FromRow, Debug)]
-struct Site {
-    id: i64,
-    user_id: i64,
-    url: String,
-    name: Option<String>,
-    created_at: i64,
-    updated_at: i64,
 }
 
 fn at(path: &str) -> salvo::Router {
