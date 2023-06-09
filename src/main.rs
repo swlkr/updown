@@ -50,6 +50,7 @@ enum AppError {
     Login,
     JsonParse,
     DatabaseSelect,
+    UrlEmpty,
 }
 
 #[derive(Debug)]
@@ -58,7 +59,6 @@ struct Env {
     pub host: String,
     pub origin: String,
     pub ws_host: String,
-    pub app_env: String,
     pub session_key: String,
 }
 
@@ -68,14 +68,12 @@ impl Env {
         let host = std::env::var("HOST").unwrap();
         let origin = std::env::var("ORIGIN").unwrap();
         let ws_host = std::env::var("WS_HOST").unwrap();
-        let app_env = std::env::var("APP_ENV").unwrap();
         let session_key = std::env::var("SESSION_KEY").unwrap();
         Self {
             database_url,
             host,
             origin,
             ws_host,
-            app_env,
             session_key,
         }
     }
@@ -163,16 +161,36 @@ impl Database {
         .await
     }
 
-    pub async fn insert_login(&self, user: User) -> Result<Login, sqlx::Error> {
+    pub async fn insert_login(&self, new_login: Login) -> Result<Login, sqlx::Error> {
         let now = Self::now();
         sqlx::query_as!(
             Login,
             "insert into logins (user_id, created_at) values (?, ?) returning *",
-            user.id,
+            new_login.user_id,
             now
         )
         .fetch_one(&self.connection)
         .await
+    }
+
+    pub async fn insert_site(&self, site: Site) -> Result<Site, sqlx::Error> {
+        let now = Self::now();
+        sqlx::query_as!(
+            Site,
+            "insert into sites (url, user_id, created_at, updated_at) values (?, ?, ?, ?) returning *",
+            site.url,
+            site.user_id,
+            now,
+            now,
+        )
+        .fetch_one(&self.connection)
+        .await
+    }
+
+    async fn sites_by_user_id(&self, user_id: i64) -> Result<Vec<Site>, sqlx::Error> {
+        sqlx::query_as!(Site, "select * from sites where user_id = ?", user_id,)
+            .fetch_all(&self.connection)
+            .await
     }
 
     // async fn hide_login_code_flash(&self, user: User) -> Result<User, sqlx::Error> {
@@ -202,9 +220,14 @@ struct Login {
     created_at: i64,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, FromRow, Debug)]
 struct Site {
+    id: i64,
+    user_id: i64,
     url: String,
+    name: Option<String>,
+    created_at: i64,
+    updated_at: i64,
 }
 
 fn at(path: &str) -> salvo::Router {
@@ -226,6 +249,7 @@ fn routes() -> Router {
         .hoop(affix::inject(arc_view))
         .get(index)
         .push(at("/login").post(login))
+        .push(at("/signup").post(signup))
         .push(at("/logout").post(logout))
         .push(at("/ws").get(liveview))
 }
@@ -247,10 +271,62 @@ async fn login(depot: &mut Depot, req: &mut Request, res: &mut Response) -> Resu
                     .insert("user_id", user.id)
                     .expect("could not set user id in session");
                 tracing::info!("inserted into session");
-                match db().insert_login(user).await {
+                let mut login_row = Login::default();
+                login_row.user_id = user.id;
+                match db().insert_login(login_row).await {
                     Ok(_) => {}
                     Err(e) => {
                         tracing::info!("{:?}", e);
+                    }
+                };
+                res.render(Json(User::default()));
+            } else {
+                res.set_status_code(StatusCode::UNAUTHORIZED);
+                res.render(Json(AppError::Login));
+            }
+        } else {
+            res.set_status_code(StatusCode::UNAUTHORIZED);
+            res.render(Json(AppError::Login));
+        }
+    } else {
+        res.set_status_code(StatusCode::UNAUTHORIZED);
+        res.render(Json(AppError::Login));
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct SignupParams {
+    url: String,
+}
+
+#[handler]
+async fn signup(depot: &mut Depot, req: &mut Request, res: &mut Response) -> Result<()> {
+    if let Ok(SignupParams { url }) = req.parse_json::<SignupParams>().await {
+        if url.is_empty() {
+            res.set_status_code(StatusCode::UNPROCESSABLE_ENTITY);
+            res.render(Json(AppError::UrlEmpty));
+        }
+        if let Ok(user) = db().insert_user().await {
+            if let Some(session) = depot.session_mut() {
+                session
+                    .insert("user_id", user.id)
+                    .expect("could not set user id in session");
+                let mut login_row = Login::default();
+                login_row.user_id = user.id;
+                match db().insert_login(login_row).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::info!("error inserting login {:?}", e);
+                    }
+                };
+                let mut site = Site::default();
+                site.user_id = user.id;
+                site.url = url;
+                match db().insert_site(site).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::info!("error inserting site {:?}", e);
                     }
                 };
                 res.render(Json(User::default()));
@@ -328,6 +404,22 @@ async fn index(res: &mut Response) -> Result<()> {
                             }}
                         }}
 
+                        async function signup(url) {{
+                            const response = await fetch("/signup", {{
+                                method: "POST",
+                                headers: {{
+                                    "Accept": "application/json",
+                                    "Content-Type": "application/json"
+                                }},
+                                body: JSON.stringify({{ url: url }})
+                            }});
+                            try {{
+                                await response.json();
+                                window.location.reload();
+                            }} catch(error) {{
+                            }}
+                        }}
+
                         async function logout() {{
                             const response = await fetch("/logout", {{
                                 method: "POST",
@@ -345,6 +437,10 @@ async fn index(res: &mut Response) -> Result<()> {
                             if(event.target.id === "login-btn") {{
                                 const login_code = document.querySelector('input[name="login-code"]').value;
                                 login(login_code).then(x => x);
+                            }}
+                            if(event.target.id === "signup-btn") {{
+                                const url = document.querySelector('input[name="url"]').value;
+                                signup(url).then(x => x);
                             }}
                             if(event.target.id === "logout-btn") {{
                                 logout().then(x => x);
@@ -376,9 +472,9 @@ async fn liveview(
         .expect("LiveViewPool was not found in the middleware")
         .clone();
     let current_user = depot.obtain::<User>().cloned();
-    let initial_view = match current_user {
-        Some(_) => View::Monitors,
-        None => View::Lander,
+    let sites = match &current_user {
+        Some(u) => db().sites_by_user_id(u.id).await.unwrap_or(vec![]),
+        None => vec![],
     };
     WebSocketUpgrade::new()
         .upgrade(req, res, |ws| async move {
@@ -388,7 +484,7 @@ async fn liveview(
                     Root,
                     RootProps {
                         current_user,
-                        initial_view,
+                        sites,
                     },
                 )
                 .await;
@@ -399,35 +495,18 @@ async fn liveview(
 #[derive(Props, PartialEq)]
 struct RootProps {
     current_user: Option<User>,
-    initial_view: View,
+    sites: Vec<Site>,
 }
 
 fn Root(cx: Scope<RootProps>) -> Element {
     let RootProps {
         current_user,
-        initial_view,
+        sites,
     } = cx.props;
     use_shared_state_provider(cx, || RootProps {
         current_user: cx.props.current_user.clone(),
-        initial_view: initial_view.clone(),
+        sites: sites.clone(),
     });
-    let sites: &UseState<Vec<Site>> = use_state(cx, || vec![]);
-    let onadd = move |event: FormEvent| {
-        cx.spawn({
-            to_owned![sites];
-            async move {
-                let url = match event.values.get("url") {
-                    Some(values) => values.first().cloned().unwrap_or_default(),
-                    None => String::with_capacity(0),
-                };
-                if url.is_empty() {
-                    return;
-                }
-                let site = Site { url };
-                sites.with_mut(|s| s.push(site));
-            }
-        })
-    };
     let initial_view = match current_user {
         Some(_) => View::Monitors,
         None => View::default(),
@@ -442,17 +521,8 @@ fn Root(cx: Scope<RootProps>) -> Element {
             class: "flex flex-col justify-center items-center pt-16 lg:pt-32 px-4 md:px-0 max-w-md mx-auto gap-16",
             Header {}
             match view.get() {
-                View::Lander => rsx! {
-                    Lander { onclick: move |_| { to_owned![view]; view.set(View::NewAccount); } }
-                },
-                View::NewAccount => rsx! {
-                    NewAccount {}
-                },
                 View::Monitors => rsx! {
-                    Monitors {
-                        onadd: onadd,
-                        sites: sites.get(),
-                    }
+                    Monitors {}
                 },
                 View::Login => rsx! {
                     NewLogin {}
@@ -476,10 +546,52 @@ fn NewLogin(cx: Scope) -> Element {
     })
 }
 
-#[inline_props]
-fn Monitors<'a>(cx: Scope, onadd: EventHandler<'a, FormEvent>, sites: &'a Vec<Site>) -> Element {
+fn Monitors(cx: Scope) -> Element {
+    let shared_state = use_shared_state::<RootProps>(cx).unwrap();
+    let current_user = shared_state.read().current_user.clone();
+    let sites = shared_state.read().sites.clone();
+    let login_code = match current_user {
+        Some(ref u) => Some(u.login_code.clone()),
+        None => None,
+    };
+    let user_id = match current_user {
+        Some(u) => u.id,
+        None => 0,
+    };
+    let sites: &UseState<Vec<Site>> = use_state(cx, || sites.clone());
+    let onadd = move |event: FormEvent| {
+        cx.spawn({
+            to_owned![sites, user_id];
+            if user_id == 0 {
+                return;
+            }
+            async move {
+                let url = match event.values.get("url") {
+                    Some(values) => values.first().cloned().unwrap_or_default(),
+                    None => String::with_capacity(0),
+                };
+                if url.is_empty() {
+                    return;
+                }
+                let mut site = Site::default();
+                site.user_id = user_id;
+                site.url = url;
+                match db().insert_site(site).await {
+                    Ok(s) => {
+                        sites.with_mut(|sites| sites.insert(0, s));
+                    }
+                    Err(_) => {}
+                }
+            }
+        })
+    };
     cx.render(rsx! {
-        AddSite { onadd: move |e| onadd.call(e) }
+        if login_code.is_some() {
+            rsx! {
+                LoginCodeAlert { login_code: login_code.unwrap() }
+            }
+        }
+        AddSite { onadd: onadd }
         div {
             class: "flex flex-col gap-4",
             sites.iter().map(|site| rsx! {
@@ -501,59 +613,9 @@ fn Header(cx: Scope) -> Element {
     })
 }
 
-#[inline_props]
-fn Lander<'a>(cx: Scope, onclick: EventHandler<'a, MouseEvent>) -> Element {
-    cx.render(rsx! {
-        Button { onclick: move |e| onclick.call(e), "Sign up and start monitoring" }
-    })
-}
-
-fn NewAccount(cx: Scope) -> Element {
-    let login_code = use_state(cx, || None);
-    let onclick = move |_| {
-        cx.spawn({
-            to_owned![login_code];
-            async move {
-                if let Ok(user) = db().insert_user().await {
-                    login_code.set(Some(user.login_code.clone()));
-                }
-            }
-        })
-    };
-    cx.render(rsx! {
-        div {
-            h1 { class: "text-2xl text-center", "Get a login code", }
-            match login_code.get() {
-                Some(c) => {
-                    rsx! {
-                        div {
-                            class: "flex flex-col gap-6",
-                            p { "Congrats! Here's your login code" }
-                            h1 { class: "text-2xl font-bold", "{c}" }
-                            LoginCodeAlert { login_code: String::default() }
-                            input { r#type: "hidden", name: "login-code", value: "{c}" }
-                            Button { id: "login-btn", "Add a site to monitor" }
-                        }
-                    }
-                },
-                None => {
-                    rsx! {
-                        Button {
-                            onclick: onclick,
-                            "Generate login code"
-                        }
-                    }
-                }
-            }
-        }
-    })
-}
-
 #[derive(Default, Clone, PartialEq)]
 enum View {
     #[default]
-    Lander,
-    NewAccount,
     Monitors,
     Account,
     Login,
@@ -563,16 +625,12 @@ enum View {
 fn Nav<'a>(cx: Scope, onclick: EventHandler<'a, View>, active_view: &'a View) -> Element {
     let ss = use_shared_state::<RootProps>(cx).unwrap();
     let logged_in = ss.read().current_user.is_some();
-    let default_view = match logged_in {
-        true => View::Monitors,
-        false => View::Lander,
-    };
     cx.render(rsx! {
         nav {
             class: "fixed lg lg:top-0 lg:bottom-auto bottom-0 w-full py-8",
             ul {
                 class: "flex lg:justify-center lg:gap-4 justify-around",
-                NavLink { active: **active_view == default_view, onclick: move |_| onclick.call(default_view.clone()), "Home" }
+                NavLink { active: **active_view == View::Monitors, onclick: move |_| onclick.call(View::Monitors), "Home" }
                 if logged_in {
                     rsx! {
                         NavLink { active: **active_view == View::Account, onclick: move |_| onclick.call(View::Account), "Account" }
@@ -609,12 +667,18 @@ fn NavLink<'a>(
 
 #[inline_props]
 fn AddSite<'a>(cx: Scope, onadd: EventHandler<'a, FormEvent>) -> Element {
+    let shared_state = use_shared_state::<RootProps>(cx).unwrap();
+    let current_user = shared_state.read().current_user.clone();
+    let id = match current_user {
+        Some(_) => "",
+        None => "signup-btn",
+    };
     cx.render(rsx! {
         form {
             onsubmit: move |event| onadd.call(event),
             class: "flex flex-col gap-2 w-full",
             TextInput { name: "url", placeholder: "https://example.com" }
-            Button { "Monitor a site" }
+            Button { id: "{id}", "Monitor a site" }
         }
     })
 }
@@ -626,7 +690,7 @@ struct ShowSiteProps<'a> {
 
 fn ShowSite<'a>(cx: Scope<'a, ShowSiteProps<'a>>) -> Element<'a> {
     let ShowSiteProps { site } = cx.props;
-    let Site { url } = site;
+    let Site { url, .. } = site;
     cx.render(rsx! {
         div {
             class: "border border-gray-200 dark:border-gray-800 dark:text-white p-2 rounded-md flex items-center justify-between",
@@ -697,13 +761,19 @@ fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
     })
 }
 
-fn current_user(cx: Scope) -> User {
-    let ss = use_shared_state::<RootProps>(cx).unwrap();
-    ss.read().current_user.clone().unwrap()
+fn current_user(cx: Scope) -> Option<User> {
+    if let Some(ss) = use_shared_state::<RootProps>(cx) {
+        ss.read().current_user.clone()
+    } else {
+        None
+    }
 }
 
 fn Account(cx: Scope) -> Element {
-    let User { login_code, .. } = current_user(cx);
+    // current user is required here
+    // this should panic if this component
+    // is somehow accessed without user
+    let login_code = current_user(cx).unwrap().login_code.clone();
     cx.render(rsx! {
         div {
             class: "grid place-content-center gap-4",
