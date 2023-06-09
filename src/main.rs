@@ -530,7 +530,23 @@ struct ShowSiteProps<'a> {
 
 fn ShowSite<'a>(cx: Scope<'a, ShowSiteProps<'a>>) -> Element<'a> {
     let ShowSiteProps { site } = cx.props;
-    let Site { url, .. } = site;
+    let Site { url, id, .. } = site;
+    // let response = use_state(cx, || Response::default());
+    let response_future = use_future(cx, (), |_| {
+        to_owned![id];
+        async move { db().latest_response_by_site(id).await }
+    });
+    let status = match response_future.value() {
+        Some(Ok(response)) => {
+            if response.status_code >= 200 && response.status_code < 300 {
+                "Online"
+            } else {
+                "Offline"
+            }
+        }
+        Some(Err(_)) => "Unknown",
+        None => "Loading",
+    };
     cx.render(rsx! {
         div {
             class: "border border-gray-200 dark:border-gray-800 dark:text-white p-2 rounded-md flex items-center justify-between",
@@ -544,7 +560,7 @@ fn ShowSite<'a>(cx: Scope<'a, ShowSiteProps<'a>>) -> Element<'a> {
                     }
                 }
                 p {
-                    class: "text-xs leading-5 text-gray-500 dark:text-gray-400", "Online"
+                    class: "text-xs leading-5 text-gray-500 dark:text-gray-400", "{status}"
                 }
             }
         }

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use models::Response;
 use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 use sqlx::{
@@ -227,11 +228,18 @@ impl Database {
             .await
     }
 
-    pub async fn upsert_response(
-        &self,
-        response: models::Response,
-    ) -> Result<models::Response, sqlx::Error> {
+    pub async fn upsert_response(&self, response: Response) -> Result<Response, sqlx::Error> {
         let now = Self::now();
-        sqlx::query_as!(models::Response, r#"insert into responses (status_code, site_id, created_at, updated_at) values (?, ?, ?, ?) on conflict (status_code, site_id) do update set updated_at = ? returning *"#, response.status_code, response.site_id, now, now, now).fetch_one(&self.connection).await
+        sqlx::query_as!(Response, r#"insert into responses (status_code, site_id, created_at, updated_at) values (?, ?, ?, ?) on conflict (status_code, site_id) do update set updated_at = ? returning *"#, response.status_code, response.site_id, now, now, now).fetch_one(&self.connection).await
+    }
+
+    pub async fn latest_response_by_site(&self, site_id: i64) -> Result<Response, sqlx::Error> {
+        sqlx::query_as!(
+            Response,
+            "select * from responses where site_id = ? order by updated_at desc limit 1",
+            site_id
+        )
+        .fetch_one(&self.connection)
+        .await
     }
 }
