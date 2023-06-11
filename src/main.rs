@@ -3,11 +3,13 @@
 use anyhow::Result;
 use dioxus::prelude::*;
 use dioxus_liveview::LiveViewPool;
+use rust_embed::RustEmbed;
 use salvo::{
     affix, handler,
     http::cookie::SameSite,
     hyper::header::ORIGIN,
     prelude::{StatusCode, StatusError, TcpListener},
+    serve_static::static_embed,
     session::{CookieStore, SessionDepotExt, SessionHandler},
     writer::{Json, Text},
     ws::WebSocketUpgrade,
@@ -19,6 +21,10 @@ use std::{
     sync::{Arc, OnceLock},
 };
 use updown::{AppError, Database, Login, Site, User};
+
+#[derive(RustEmbed)]
+#[folder = "static"]
+struct Assets;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -84,14 +90,18 @@ fn routes() -> Router {
     let view = LiveViewPool::new();
     let arc_view = Arc::new(view);
     Router::new()
-        .hoop(session_handler)
-        .hoop(set_current_user_handler)
-        .hoop(affix::inject(arc_view))
-        .get(index)
-        .push(at("/login").post(login))
-        .push(at("/signup").post(signup))
-        .push(at("/logout").post(logout))
-        .push(at("/ws").get(liveview))
+        .push(
+            Router::new()
+                .hoop(session_handler)
+                .hoop(set_current_user_handler)
+                .hoop(affix::inject(arc_view))
+                .get(index)
+                .push(at("/login").post(login))
+                .push(at("/signup").post(signup))
+                .push(at("/logout").post(logout))
+                .push(at("/ws").get(liveview)),
+        )
+        .push(at("<**path>").get(static_embed::<Assets>()))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -219,74 +229,15 @@ async fn index(res: &mut Response) -> Result<()> {
                     <meta charset="utf-8">
                     <meta content="width=device-width, initial-scale=1" name="viewport">
                     <title>updown</title>
-                    <script src="https://cdn.tailwindcss.com"></script>
+                    <script defer src="https://cdn.tailwindcss.com"></script>
                     <style>
                         .box-shadow-md {{ box-shadow: 0 6px var(--tw-shadow-color); }}
                         .hover\:box-shadow-xs:hover {{ box-shadow: 0 4px var(--tw-shadow-color); }}
                     </style>
+                    <script defer src="./main.js"></script>
                 </head>
                 <body class="h-full dark:bg-gray-950 bg-gray-50 dark:text-white text-gray-900">
                     <div id="main" class="h-full"></div>
-                    <script>
-                        async function login(login_code) {{
-                            const response = await fetch("/login", {{
-                                method: "POST",
-                                headers: {{
-                                    "Accept": "application/json",
-                                    "Content-Type": "application/json"
-                                }},
-                                body: JSON.stringify({{ login_code: login_code }})
-                            }});
-                            try {{
-                                await response.json();
-                                window.location.reload();
-                            }} catch(error) {{
-                            }}
-                        }}
-
-                        async function signup(url) {{
-                            const response = await fetch("/signup", {{
-                                method: "POST",
-                                headers: {{
-                                    "Accept": "application/json",
-                                    "Content-Type": "application/json"
-                                }},
-                                body: JSON.stringify({{ url: url }})
-                            }});
-                            try {{
-                                await response.json();
-                                window.location.reload();
-                            }} catch(error) {{
-                            }}
-                        }}
-
-                        async function logout() {{
-                            const response = await fetch("/logout", {{
-                                method: "POST",
-                                headers: {{
-                                    "Content-Type": "application/json"
-                                }}
-                            }});
-                            try {{
-                                await response.json();
-                                window.location.reload();
-                            }} catch(error) {{}}
-                        }}
-
-                        document.addEventListener("click", (event) => {{
-                            if(event.target.id === "login-btn") {{
-                                const login_code = document.querySelector('input[name="login-code"]').value;
-                                login(login_code).then(x => x);
-                            }}
-                            if(event.target.id === "signup-btn") {{
-                                const url = document.querySelector('input[name="url"]').value;
-                                signup(url).then(x => x);
-                            }}
-                            if(event.target.id === "logout-btn") {{
-                                logout().then(x => x);
-                            }}
-                        }});
-                    </script>
                 </body>
                 {}
             </html>

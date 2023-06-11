@@ -14,7 +14,7 @@ dioxus-hot-reload = { git = "https://github.com/dioxuslabs/dioxus" }
 salvo = { version = "0.37", features = ["full", "affix", "ws"] }
 sqlx = { version = "0.7.0-alpha.3", features = ["sqlite", "migrate", "runtime-tokio"] }
 tokio = { version = "1", features = ["full"] }
-rust-embed = { version = "6.4.2" }
+rust-embed = "6.4.2"
 serde = "1.0.152"
 anyhow = "1.0.69"
 rand = "0.8.5"
