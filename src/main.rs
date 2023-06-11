@@ -229,7 +229,7 @@ async fn index(res: &mut Response) -> Result<()> {
                     <meta charset="utf-8">
                     <meta content="width=device-width, initial-scale=1" name="viewport">
                     <title>updown</title>
-                    <script defer src="https://cdn.tailwindcss.com"></script>
+                    <script src="https://cdn.tailwindcss.com"></script>
                     <style>
                         .box-shadow-md {{ box-shadow: 0 6px var(--tw-shadow-color); }}
                         .hover\:box-shadow-xs:hover {{ box-shadow: 0 4px var(--tw-shadow-color); }}
