@@ -22,22 +22,71 @@ use std::{
 };
 use updown::{AppError, Database, Login, Site, User};
 
-#[derive(RustEmbed)]
-#[folder = "static"]
-struct Assets;
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    // hot_reload_init!();
+    tracing_subscriber::fmt().init();
     ENV.set(Env::new()).unwrap();
     DB.set(Database::new(env().database_url.clone()).await)
         .unwrap();
-    tracing_subscriber::fmt().init();
+    let args: Vec<String> = std::env::args().collect();
+    let Some(arg) = args.get(1) else {
+        server().await?;
+        return Ok(());
+    };
+    match arg.as_str() {
+        "migrate" => {
+            db().migrate().await?;
+        }
+        "rollback" => {
+            db().rollback().await?;
+        }
+        "watch" => {
+            watch().await?;
+        }
+        _ => todo!(),
+    };
+    Ok(())
+}
+
+async fn server() -> Result<()> {
+    // hot_reload_init!();
     let addr: SocketAddr = env().host.parse()?;
     println!("Listening on {}", addr);
     Server::new(TcpListener::bind(addr)).serve(routes()).await;
     Ok(())
 }
+
+async fn watch() -> Result<()> {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+
+    loop {
+        interval.tick().await;
+        tokio::spawn(async {
+            _ = monitor().await;
+        });
+    }
+}
+
+async fn monitor() -> Result<()> {
+    let sites = db().sites().await?;
+    for site in sites {
+        let response = response(&site).await?;
+        db().upsert_response(response).await?;
+    }
+    Ok(())
+}
+
+async fn response<'a>(site: &'a Site) -> Result<updown::models::Response> {
+    let status_code: i64 = reqwest::get(&site.url).await?.status().as_u16() as i64;
+    let mut res = updown::models::Response::default();
+    res.status_code = status_code;
+    res.site_id = site.id;
+    Ok(res)
+}
+
+#[derive(RustEmbed)]
+#[folder = "static"]
+struct Assets;
 
 static ENV: OnceLock<Env> = OnceLock::new();
 static DB: OnceLock<Database> = OnceLock::new();
