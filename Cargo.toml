@@ -11,7 +11,7 @@ dioxus-interpreter-js = { git = "https://github.com/dioxuslabs/dioxus" }
 dioxus-liveview = { git = "https://github.com/dioxuslabs/dioxus", features = ["salvo"] }
 dioxus-ssr = { git = "https://github.com/dioxuslabs/dioxus" }
 dioxus-hot-reload = { git = "https://github.com/dioxuslabs/dioxus" }
-salvo = { version = "0.37", features = ["full", "affix", "ws"] }
+salvo = { version = "0.37", features = ["rustls", "affix", "ws", "cookie", "anyhow", "session", "serve-static"] }
 sqlx = { version = "0.7.0-alpha.3", features = ["sqlite", "migrate", "runtime-tokio"] }
 tokio = { version = "1", features = ["full"] }
 rust-embed = "6.4.2"
@@ -22,7 +22,7 @@ once_cell = "1.17.1"
 tracing = "0.1.37"
 tracing-subscriber = "0.3.16"
 nanoid = { version = "0.4.0" }
-reqwest = "0.11.18"
+reqwest = { version = "0.11.18", features = ["rustls-tls"], default-features = false }
 
 [profile.dev.package.sqlx-macros]
 opt-level = 3
