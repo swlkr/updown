@@ -111,33 +111,14 @@ struct LoginParams {
 
 #[handler]
 async fn login(depot: &mut Depot, req: &mut Request, res: &mut Response) -> Result<()> {
-    if let Ok(login_params) = req.parse_json::<LoginParams>().await {
-        if let Ok(user) = db()
-            .user_by_login_code(login_params.login_code.clone())
-            .await
-        {
-            if let Some(session) = depot.session_mut() {
-                session
-                    .insert("user_id", user.id)
-                    .expect("could not set user id in session");
-                tracing::info!("inserted into session");
-                let mut login_row = Login::default();
-                login_row.user_id = user.id;
-                match db().insert_login(login_row).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::info!("{:?}", e);
-                    }
-                };
-                res.render(Json(User::default()));
-            } else {
-                res.set_status_code(StatusCode::UNAUTHORIZED);
-                res.render(Json(AppError::Login));
-            }
-        } else {
-            res.set_status_code(StatusCode::UNAUTHORIZED);
-            res.render(Json(AppError::Login));
-        }
+    let LoginParams { login_code } = req.parse_json::<LoginParams>().await?;
+    let user = db().user_by_login_code(login_code).await?;
+    let session = depot.session_mut().ok_or(AppError::Login)?;
+    _ = session.insert("user_id", user.id)?;
+    let new_login: Login = Database::new_login(user.id);
+    if let Ok(_) = db().insert_login(new_login).await {
+        res.set_status_code(StatusCode::OK);
+        res.render(Json(Login::default()));
     } else {
         res.set_status_code(StatusCode::UNAUTHORIZED);
         res.render(Json(AppError::Login));
@@ -152,42 +133,26 @@ struct SignupParams {
 
 #[handler]
 async fn signup(depot: &mut Depot, req: &mut Request, res: &mut Response) -> Result<()> {
-    if let Ok(SignupParams { url }) = req.parse_json::<SignupParams>().await {
-        if url.is_empty() {
-            res.set_status_code(StatusCode::UNPROCESSABLE_ENTITY);
-            res.render(Json(AppError::UrlEmpty));
-        }
-        if let Ok(user) = db().insert_user().await {
-            if let Some(session) = depot.session_mut() {
-                session
-                    .insert("user_id", user.id)
-                    .expect("could not set user id in session");
-                let mut login_row = Login::default();
-                login_row.user_id = user.id;
-                match db().insert_login(login_row).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::info!("error inserting login {:?}", e);
-                    }
-                };
-                let mut site = Site::default();
-                site.user_id = user.id;
-                site.url = url;
-                match db().insert_site(site).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::info!("error inserting site {:?}", e);
-                    }
-                };
-                res.render(Json(User::default()));
-            } else {
-                res.set_status_code(StatusCode::UNAUTHORIZED);
-                res.render(Json(AppError::Login));
-            }
-        } else {
-            res.set_status_code(StatusCode::UNAUTHORIZED);
-            res.render(Json(AppError::Login));
-        }
+    let SignupParams { url } = req.parse_json::<SignupParams>().await?;
+    if url.is_empty() {
+        res.set_status_code(StatusCode::UNPROCESSABLE_ENTITY);
+        res.render(Json(AppError::UrlEmpty));
+        return Ok(());
+    }
+    let user = db().insert_user().await?;
+    let session = depot.session_mut().ok_or(AppError::Login)?;
+    session
+        .insert("user_id", user.id)
+        .expect("could not set user id in session");
+    let mut login_row = Login::default();
+    login_row.user_id = user.id;
+    _ = db().insert_login(login_row).await?;
+    let mut site = Site::default();
+    site.user_id = user.id;
+    site.url = url;
+    if let Ok(_) = db().insert_site(site).await {
+        res.set_status_code(StatusCode::OK);
+        res.render(Json(AppError::Login));
     } else {
         res.set_status_code(StatusCode::UNAUTHORIZED);
         res.render(Json(AppError::Login));
