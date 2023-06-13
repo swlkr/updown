@@ -574,7 +574,7 @@ fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
     let TextInputProps { name, placeholder } = cx.props;
     cx.render(rsx! {
         input {
-            class: "rounded-lg px-2 py-3 border dark:border-cyan-500 outline-none text-black",
+            class: "rounded-lg px-2 py-3 border dark:border-gray-700 dark:text-white dark:bg-gray-800 outline-none text-black",
             r#type: "text",
             name: "{name}",
             placeholder: placeholder.unwrap_or_default()
