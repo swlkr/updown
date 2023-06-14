@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "select * from responses where site_id = ? order by updated_at desc limit 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "site_id",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "status_code",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 4,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "661374a783e4093f650271fba1e34ade5c3d2f1adbcf3706d83818713a7a177b"
+}

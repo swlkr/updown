@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "insert into responses (status_code, site_id, created_at, updated_at) values (?, ?, ?, ?) on conflict (status_code, site_id) do update set updated_at = ? returning *",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "site_id",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "status_code",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 4,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "da1debdc999e8ae6fcefb7631ce80cea13b32ebb5815013baf28c9886e538a0b"
+}
