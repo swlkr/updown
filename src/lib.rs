@@ -242,4 +242,10 @@ impl Database {
         .fetch_one(&self.connection)
         .await
     }
+
+    pub fn new_login(user_id: i64) -> Login {
+        let mut login = Login::default();
+        login.user_id = user_id;
+        return login;
+    }
 }
