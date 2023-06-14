@@ -1101,39 +1101,38 @@ function event_bubbles(event) {
   }
 }
 
-function connect(root) {
+function connect(root, interpreter) {
     let ws = new WebSocket(WS_ADDR);
 
-    function ping() {
-      ws.send("__ping__");
-    }
+    // we ping every 45 seconds to keep the websocket alive
+    let interval = null;
 
     ws.onopen = () => {
-      // we ping every 45 seconds to keep the websocket alive
-      setInterval(ping, 45000);
+      interval = setInterval(() => ws.send("__ping__"), 45000);
       ws.send(serializeIpcMessage("initialize"));
     };
 
     ws.onerror = (err) => {
-        root.innerHTML = "";
+        if(!!interval) { clearInterval(interval); }
+        root.innerHTML = "I'm probably pushing some new code. Automically trying to reconnect every 5 seconds.";
         // try reconnecting every 5 seconds
         setTimeout(() => {
-            connect(root);
+          main();
         }, 5000);
     };
 
     ws.onmessage = (message) => {
-        if (message.data === "__pong__") { return; }
-
-        const event = JSON.parse(message.data);
-        switch (event.type) {
-          case "edits":
-            let edits = event.data;
-            window.interpreter.handleEdits(edits);
-            break;
-          case "query":
-            Function("Eval", `"use strict";${event.data};`)();
-            break;
+        if (message.data !== "__pong__") {
+          const event = JSON.parse(message.data);
+          switch (event.type) {
+            case "edits":
+              let edits = event.data;
+              interpreter.handleEdits(edits);
+              break;
+            case "query":
+              Function("Eval", `"use strict";${event.data};`)();
+              break;
+          }
         }
     };
 
@@ -1142,8 +1141,8 @@ function connect(root) {
 
 class IPC {
   constructor(root) {
-    window.interpreter = new Interpreter(root, new InterpreterConfig(false));
-    this.ws = connect(root);
+    let interpreter = new Interpreter(root, new InterpreterConfig(false));
+    this.ws = connect(root, interpreter);
   }
 
   postMessage(msg) {
@@ -1154,6 +1153,7 @@ class IPC {
 function main() {
   let root = window.document.getElementById("main");
   if (root != null) {
+    if(root.innerHTML.length !== 0) { root.innerHTML = ""; }
     window.ipc = new IPC(root);
   }
 }
