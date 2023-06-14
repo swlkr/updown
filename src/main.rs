@@ -252,6 +252,10 @@ async fn set_current_user_handler(depot: &mut Depot) {
 async fn index(res: &mut Response) -> Result<()> {
     let ws_addr = &env().ws_host;
     let liveview_js = dioxus_liveview::interpreter_glue(ws_addr);
+    #[cfg(debug_assertions)]
+    let tailwind_css = r#"<script src="https://cdn.tailwindcss.com"></script>"#;
+    #[cfg(not(debug_assertions))]
+    let tailwind_css = r#"<link href="./tailwind.css" rel="stylesheet" />"#;
     res.render(Text::Html(format!(
         r#"
             <!DOCTYPE html>
@@ -260,7 +264,7 @@ async fn index(res: &mut Response) -> Result<()> {
                     <meta charset="utf-8">
                     <meta content="width=device-width, initial-scale=1" name="viewport">
                     <title>updown</title>
-                    <script src="https://cdn.tailwindcss.com"></script>
+                    {}
                     <style>
                         .box-shadow-md {{ box-shadow: 0 6px var(--tw-shadow-color); }}
                         .hover\:box-shadow-xs:hover {{ box-shadow: 0 4px var(--tw-shadow-color); }}
@@ -273,7 +277,7 @@ async fn index(res: &mut Response) -> Result<()> {
                 {}
             </html>
         "#,
-        liveview_js
+        tailwind_css, liveview_js
     )));
     Ok(())
 }
