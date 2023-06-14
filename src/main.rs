@@ -555,7 +555,16 @@ struct ButtonProps<'a> {
     id: Option<&'a str>,
     #[props(optional)]
     onclick: Option<EventHandler<'a, MouseEvent>>,
+    #[props(optional)]
+    style: Option<ButtonStyle>,
     children: Element<'a>,
+}
+
+#[derive(Default, Copy, Clone)]
+enum ButtonStyle {
+    Small,
+    #[default]
+    Default,
 }
 
 fn Button<'a>(cx: Scope<'a, ButtonProps<'a>>) -> Element {
@@ -563,6 +572,7 @@ fn Button<'a>(cx: Scope<'a, ButtonProps<'a>>) -> Element {
         id,
         onclick,
         children,
+        style,
     } = cx.props;
     let onclick = move |event| {
         if let Some(click) = onclick {
@@ -570,10 +580,17 @@ fn Button<'a>(cx: Scope<'a, ButtonProps<'a>>) -> Element {
         }
     };
     let id = id.unwrap_or_default();
+    let style = style.unwrap_or_default();
+    let default_class = "bg-cyan-400 text-white rounded-3xl box-shadow-md shadow-cyan-600 hover:box-shadow-xs hover:top-0.5 active:shadow-none active:top-1 relative";
+    let class = match style {
+        ButtonStyle::Small => "px-2 py-1",
+        ButtonStyle::Default => "px-4 py-3 w-full",
+    };
+    let class = format!("{default_class} {}", class);
     cx.render(rsx! {
         button {
             id: id,
-            class: "bg-cyan-400 text-white px-2 py-3 rounded-3xl box-shadow-md shadow-cyan-600 hover:box-shadow-xs hover:top-0.5 active:shadow-none active:top-1 w-full relative",
+            class: "{class}",
             onclick: onclick,
             children
         }
@@ -623,12 +640,28 @@ fn Account(cx: Scope) -> Element {
 
 #[inline_props]
 fn LoginCodeAlert(cx: Scope, login_code: String) -> Element {
+    let blur_class = use_state(cx, || "blur-sm");
+    let text = use_state(cx, || "Show");
+    let onclick = move |_| {
+        to_owned![blur_class];
+        if blur_class == "blur-sm" {
+            blur_class.set("");
+            text.set("Hide");
+        } else {
+            blur_class.set("blur-sm");
+            text.set("Show");
+        }
+    };
     cx.render(rsx! {
         div {
             class: "bg-blue-50 p-4 rounded-md text-blue-500 flex flex-col gap-1",
             p { "This is the only identifier you need to use updown." }
             p { "No email, no username. Just simplicity." }
-            div { class: "font-bold text-2xl", "{login_code}" }
+            div {
+                class: "flex gap-2",
+                div { class: "font-bold text-2xl {blur_class}", "{login_code}" }
+                Button { onclick: onclick, style: ButtonStyle::Small, "{text}" }
+            }
         }
     })
 }
