@@ -17,6 +17,7 @@ use salvo::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::{Arc, OnceLock},
 };
@@ -91,7 +92,7 @@ struct Assets;
 static ENV: OnceLock<Env> = OnceLock::new();
 static DB: OnceLock<Database> = OnceLock::new();
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Env {
     pub database_url: String,
     pub host: String,
@@ -102,17 +103,33 @@ struct Env {
 
 impl Env {
     fn new() -> Self {
-        let database_url = std::env::var("DATABASE_URL").unwrap();
-        let host = std::env::var("HOST").unwrap();
-        let origin = std::env::var("ORIGIN").unwrap();
-        let ws_host = std::env::var("WS_HOST").unwrap();
-        let session_key = std::env::var("SESSION_KEY").unwrap();
+        Self::parse(Self::read())
+    }
+
+    fn read() -> String {
+        std::fs::read_to_string(".env").unwrap_or_default()
+    }
+
+    fn parse(file: String) -> Self {
+        let data = file
+            .lines()
+            .flat_map(|line| line.split("="))
+            .collect::<Vec<_>>()
+            .chunks_exact(2)
+            .map(|x| (x[0], x[1]))
+            .collect::<HashMap<_, _>>();
         Self {
-            database_url,
-            host,
-            origin,
-            ws_host,
-            session_key,
+            database_url: data
+                .get("DATABASE_URL")
+                .expect("DATABASE_URL is missing")
+                .to_string(),
+            host: data.get("HOST").expect("HOST is missing").to_string(),
+            origin: data.get("ORIGIN").expect("ORIGIN is missing").to_string(),
+            ws_host: data.get("WS_HOST").expect("WS_HOST is missing").to_string(),
+            session_key: data
+                .get("SESSION_KEY")
+                .expect("SESSION_KEY is missing")
+                .to_string(),
         }
     }
 }
