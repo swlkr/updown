@@ -251,7 +251,6 @@ async fn set_current_user_handler(depot: &mut Depot) {
 #[handler]
 async fn index(res: &mut Response) -> Result<()> {
     let ws_addr = &env().ws_host;
-    let liveview_js = dioxus_liveview::interpreter_glue(ws_addr);
     #[cfg(debug_assertions)]
     let tailwind_css = r#"<script src="https://cdn.tailwindcss.com"></script>"#;
     #[cfg(not(debug_assertions))]
@@ -263,8 +262,9 @@ async fn index(res: &mut Response) -> Result<()> {
                 <head>
                     <meta charset="utf-8">
                     <meta content="width=device-width, initial-scale=1" name="viewport">
+                    <meta name="ws-addr" content="{ws_addr}">
                     <title>updown</title>
-                    {}
+                    {tailwind_css}
                     <style>
                         .box-shadow-md {{ box-shadow: 0 6px var(--tw-shadow-color); }}
                         .hover\:box-shadow-xs:hover {{ box-shadow: 0 4px var(--tw-shadow-color); }}
@@ -274,10 +274,8 @@ async fn index(res: &mut Response) -> Result<()> {
                 <body class="h-full dark:bg-gray-950 bg-gray-50 dark:text-white text-gray-900">
                     <div id="main" class="h-full"></div>
                 </body>
-                {}
             </html>
-        "#,
-        tailwind_css, liveview_js
+        "#
     )));
     Ok(())
 }
