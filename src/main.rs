@@ -255,7 +255,6 @@ const TAILWIND_CSS: &'static str = r#"<script src="https://cdn.tailwindcss.com">
 const TAILWIND_CSS: &'static str = r#"<link href="./tailwind.css" rel="stylesheet" />"#;
 #[cfg(debug_assertions)]
 const RETRY_MS: u16 = 1_000;
-#[allow]
 #[cfg(not(debug_assertions))]
 const RETRY_MS: u16 = 45_000;
 
