@@ -101,10 +101,11 @@ impl Database {
     }
 
     pub async fn migrate(&self) -> Result<(), AppError> {
-        sqlx::migrate!()
-            .run(&self.connection)
-            .await
-            .map_err(|_| AppError::Migrate)
+        let result = sqlx::migrate!().run(&self.connection).await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(err) => panic!("{}", err),
+        }
     }
 
     pub async fn rollback(&self) -> Result<SqliteQueryResult, AppError> {
@@ -247,5 +248,11 @@ impl Database {
         let mut login = Login::default();
         login.user_id = user_id;
         return login;
+    }
+
+    pub async fn login_count(&self, user_id: i64) -> Result<i32, sqlx::Error> {
+        sqlx::query_scalar!("select count(id) from logins where user_id = ?", user_id)
+            .fetch_one(&self.connection)
+            .await
     }
 }

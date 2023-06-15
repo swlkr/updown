@@ -56,8 +56,6 @@ document.addEventListener("click", (event) => {
     }
 });
 
-const WS_ADDR = document.querySelector("meta[name=\"ws-addr\"]").getAttribute("content");
-
 class ListenerMap {
   constructor(root) {
     // bubbling events can listen at the root element
@@ -1101,10 +1099,11 @@ function event_bubbles(event) {
   }
 }
 
+const WS_ADDR = document.querySelector("meta[name=\"ws-addr\"]").getAttribute("content");
+const RETRY_MS = document.querySelector("meta[name=\"retry-ms\"]").getAttribute("content");
+
 function connect(root, interpreter) {
     let ws = new WebSocket(WS_ADDR);
-
-    // we ping every 45 seconds to keep the websocket alive
     let interval = null;
 
     ws.onopen = () => {
@@ -1114,11 +1113,10 @@ function connect(root, interpreter) {
 
     ws.onerror = (err) => {
         if(!!interval) { clearInterval(interval); }
-        root.innerHTML = "I'm probably pushing some new code. Automically trying to reconnect every 5 seconds.";
-        // try reconnecting every 5 seconds
+        root.innerHTML = `I'm probably pushing some new code. Automatically trying to reconnect every ${RETRY_MS / 1000} seconds.`;
         setTimeout(() => {
           main();
-        }, 5000);
+        }, RETRY_MS);
     };
 
     ws.onmessage = (message) => {

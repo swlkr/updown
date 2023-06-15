@@ -248,13 +248,19 @@ async fn set_current_user_handler(depot: &mut Depot) {
     }
 }
 
+#[cfg(debug_assertions)]
+const TAILWIND_CSS: &'static str = r#"<script src="https://cdn.tailwindcss.com"></script>"#;
+#[cfg(not(debug_assertions))]
+const TAILWIND_CSS: &'static str = r#"<link href="./tailwind.css" rel="stylesheet" />"#;
+#[cfg(debug_assertions)]
+const RETRY_MS: u16 = 1_000;
+#[allow]
+#[cfg(not(debug_assertions))]
+const RETRY_MS: u16 = 45_000;
+
 #[handler]
 async fn index(res: &mut Response) -> Result<()> {
     let ws_addr = &env().ws_host;
-    #[cfg(debug_assertions)]
-    let tailwind_css = r#"<script src="https://cdn.tailwindcss.com"></script>"#;
-    #[cfg(not(debug_assertions))]
-    let tailwind_css = r#"<link href="./tailwind.css" rel="stylesheet" />"#;
     res.render(Text::Html(format!(
         r#"
             <!DOCTYPE html>
@@ -262,9 +268,10 @@ async fn index(res: &mut Response) -> Result<()> {
                 <head>
                     <meta charset="utf-8">
                     <meta content="width=device-width, initial-scale=1" name="viewport">
-                    <meta name="ws-addr" content="{ws_addr}">
+                    <meta name="ws-addr" content="{ws_addr}"">
+                    <meta name="retry-ms" content="{RETRY_MS}">
                     <title>updown</title>
-                    {tailwind_css}
+                    {TAILWIND_CSS}
                     <style>
                         .box-shadow-md {{ box-shadow: 0 6px var(--tw-shadow-color); }}
                         .hover\:box-shadow-xs:hover {{ box-shadow: 0 4px var(--tw-shadow-color); }}
@@ -296,18 +303,22 @@ async fn liveview(
         .expect("LiveViewPool was not found in the middleware")
         .clone();
     let current_user = depot.obtain::<User>().cloned();
-    let sites = match &current_user {
-        Some(u) => db().sites_by_user_id(u.id).await.unwrap_or(vec![]),
-        None => vec![],
+    let (sites, login_count) = if let Some(user) = &current_user {
+        let sites = db().sites_by_user_id(user.id).await.unwrap_or(vec![]);
+        let login_count = db().login_count(user.id).await.unwrap_or(0);
+        (sites, login_count)
+    } else {
+        (vec![], 0)
     };
     WebSocketUpgrade::new()
-        .upgrade(req, res, |ws| async move {
+        .upgrade(req, res, move |ws| async move {
             let _ = view
                 .launch_with_props::<RootProps>(
                     dioxus_liveview::salvo_socket(ws),
                     Root,
                     RootProps {
                         current_user,
+                        login_count,
                         sites,
                     },
                 )
@@ -320,89 +331,60 @@ async fn liveview(
 struct RootProps {
     current_user: Option<User>,
     sites: Vec<Site>,
+    login_count: i32,
 }
 
 fn Root(cx: Scope<RootProps>) -> Element {
     let RootProps {
         current_user,
         sites,
+        login_count,
     } = cx.props;
     use_shared_state_provider(cx, || RootProps {
         current_user: cx.props.current_user.clone(),
         sites: sites.clone(),
+        login_count: login_count.clone(),
     });
-    let initial_view = match current_user {
-        Some(_) => View::Monitors,
-        None => View::default(),
+    let initial_view = match (current_user, login_count) {
+        (Some(_), 1) => View::Account,
+        (Some(_), _) => View::Monitors,
+        (None, _) => View::default(),
     };
     let view = use_state(cx, || initial_view);
     let onnav = move |new_view| {
         to_owned![view];
         view.set(new_view);
     };
-    cx.render(rsx! {
-        div {
-            class: "flex flex-col justify-center items-center pt-16 lg:pt-32 px-4 md:px-0 max-w-md mx-auto gap-16",
-            Header {}
-            match view.get() {
-                View::Monitors => rsx! {
-                    Monitors {}
-                },
-                View::Login => rsx! {
-                    NewLogin {}
-                },
-                View::Account => rsx! {
-                    Account {}
-                }
-            }
-        }
-        Nav { onclick: onnav, active_view: view.get() }
-    })
-}
-
-fn NewLogin(cx: Scope) -> Element {
-    cx.render(rsx! {
-        div {
-            class: "flex flex-col gap-2",
-            TextInput { name: "login-code" }
-            Button { id: "login-btn", "Login" }
-        }
-    })
-}
-
-fn Monitors(cx: Scope) -> Element {
-    let shared_state = use_shared_state::<RootProps>(cx).unwrap();
-    let current_user = shared_state.read().current_user.clone();
-    let sites = shared_state.read().sites.clone();
-    let login_code = match current_user {
-        Some(ref u) => Some(u.login_code.clone()),
-        None => None,
+    let add_site_sheet_shown = use_state(cx, || false);
+    let show_add_site_sheet = move |_| {
+        add_site_sheet_shown.set(!add_site_sheet_shown.get());
     };
     let user_id = match current_user {
         Some(u) => u.id,
         None => 0,
     };
-    let sites: &UseState<Vec<Site>> = use_state(cx, || sites.clone());
+    let sites = use_state(cx, || sites.clone());
     let onadd = move |event: FormEvent| {
         cx.spawn({
-            to_owned![sites, user_id];
+            to_owned![sites, user_id, add_site_sheet_shown];
             if user_id == 0 {
                 return;
             }
+            let url = match event.values.get("url") {
+                Some(values) => values.first().cloned().unwrap_or_default(),
+                None => String::with_capacity(0),
+            };
+            if url.is_empty() {
+                return;
+            }
             async move {
-                let url = match event.values.get("url") {
-                    Some(values) => values.first().cloned().unwrap_or_default(),
-                    None => String::with_capacity(0),
-                };
-                if url.is_empty() {
-                    return;
-                }
                 let mut site = Site::default();
                 site.user_id = user_id;
                 site.url = url;
                 match db().insert_site(site).await {
                     Ok(s) => {
                         sites.with_mut(|sites| sites.insert(0, s));
+                        add_site_sheet_shown.set(false);
                     }
                     Err(_) => {}
                 }
@@ -410,17 +392,102 @@ fn Monitors(cx: Scope) -> Element {
         })
     };
     cx.render(rsx! {
-        if login_code.is_some() {
-            rsx! {
-                LoginCodeAlert { login_code: login_code.unwrap() }
+        div {
+            class: "flex flex-col justify-center md:items-center pt-4 md:pt-16 lg:pt-32 px-4 md:px-0 max-w-md mx-auto gap-4 md:gap-16 md:mb-0 pb-32 overflow-auto",
+            Header {}
+            match view.get() {
+                View::Index => rsx! {
+                    Index {}
+                },
+                View::Monitors => rsx! {
+                    Monitors {
+                        sites: sites.get()
+                    }
+                },
+                View::Login => rsx! {
+                    NewLogin {}
+                },
+                View::Account => rsx! {
+                    Account { onnav: onnav, current_user: current_user }
+                }
             }
         }
-        AddSite { onadd: onadd }
+        Nav { onclick: onnav, active_view: view.get() }
+        Fab { 
+            onclick: show_add_site_sheet,
+            div { class: "text-2xl", "+" } 
+        }
+        Sheet {
+            shown: *add_site_sheet_shown.get(),
+            onclose: move |_| {
+                to_owned![add_site_sheet_shown];
+                add_site_sheet_shown.set(false);
+            }
+            div {
+                AddSite { onadd: onadd }
+            }
+        }
+    })
+}
+
+#[inline_props]
+fn Sheet<'a>(cx: Scope, shown: bool, onclose: EventHandler<'a>, children: Element<'a>) -> Element<'a> {
+    let translate_y = match shown {
+        true => "",
+        false => "translate-y-full"
+    };
+    return cx.render(
+        rsx! {
+            div {
+                class: "transition ease-out overflow-y-auto {translate_y} min-h-[80%] left-0 right-0 bottom-0 lg:max-w-3xl lg:mx-auto fixed p-6 rounded-md bg-gray-50 dark:bg-gray-900 z-30",
+                div {
+                    class: "flex justify-end items-end mb-6",
+                    CircleButton {
+                        onclick: move |_| onclose.call(()),
+                        div { class: "text-2xl mb-1", "x" }
+                    }
+                }
+                children
+            }
+        }
+    );
+}
+
+#[inline_props]
+fn CircleButton<'a>(cx: Scope, onclick: EventHandler<'a>, children: Element<'a>) -> Element<'a> {
+    cx.render(rsx! {
+        button {
+            class: "rounded-full bg-gray-800 w-12 h-12 flex justify-center items-center",
+            onclick: move |_| onclick.call(()),
+            children
+        }
+    })
+}
+
+fn NewLogin(cx: Scope) -> Element {
+    cx.render(rsx! {
+        div {
+            class: "flex flex-col gap-2 w-full",
+            TextInput { placeholder: "Your login code goes here", name: "login-code" }
+            Button { id: "login-btn", "Login" }
+        }
+    })
+}
+
+fn Index(cx: Scope) -> Element {
+    cx.render(rsx! {
+        AddSite { id: "signup-btn" }
+    })
+}
+
+#[inline_props]
+fn Monitors<'a>(cx: Scope, sites: &'a Vec<Site>) -> Element {
+    cx.render(rsx! {
         div {
             class: "flex flex-col gap-4",
             sites.iter().map(|site| rsx! {
                 ShowSite {
-                    key: "{site.url}",
+                    key: "{site.id}",
                     site: site
                 }
             })
@@ -431,8 +498,9 @@ fn Monitors(cx: Scope) -> Element {
 fn Header(cx: Scope) -> Element {
     cx.render(rsx! {
         div {
-            h1 { class: "text-4xl text-center", "updown" }
-            h2 { class: "text-xl text-center", "your friendly neighborhood uptime monitor" }
+            class: "flex md:flex-col md:gap-2",
+            h1 { class: "text-xl md:text-4xl md:text-center text-left", "updown" }
+            h2 { class: "text-xl text-center hidden md:block", "your friendly neighborhood uptime monitor" }
         }
     })
 }
@@ -440,6 +508,7 @@ fn Header(cx: Scope) -> Element {
 #[derive(Default, Clone, PartialEq)]
 enum View {
     #[default]
+    Index,
     Monitors,
     Account,
     Login,
@@ -451,13 +520,14 @@ fn Nav<'a>(cx: Scope, onclick: EventHandler<'a, View>, active_view: &'a View) ->
     let logged_in = ss.read().current_user.is_some();
     cx.render(rsx! {
         nav {
-            class: "fixed lg lg:top-0 lg:bottom-auto bottom-0 w-full py-8",
+            class: "fixed lg lg:top-0 lg:bottom-auto bottom-0 w-full py-6 dark:bg-gray-900",
             ul {
                 class: "flex lg:justify-center lg:gap-4 justify-around",
-                NavLink { active: **active_view == View::Monitors, onclick: move |_| onclick.call(View::Monitors), "Home" }
+                NavLink { active: **active_view == View::Monitors, onclick: move |_| onclick.call(View::Monitors), "Sites" }
                 if logged_in {
                     rsx! {
                         NavLink { active: **active_view == View::Account, onclick: move |_| onclick.call(View::Account), "Account" }
+                        NavLink { id: "logout-btn", "Logout" }
                     }
                 } else {
                     rsx! {
@@ -472,34 +542,45 @@ fn Nav<'a>(cx: Scope, onclick: EventHandler<'a, View>, active_view: &'a View) ->
 #[inline_props]
 fn NavLink<'a>(
     cx: Scope,
-    active: bool,
-    onclick: EventHandler<'a, ()>,
+    active: Option<bool>,
+    onclick: Option<EventHandler<'a, ()>>,
+    id: Option<&'a str>,
     children: Element<'a>,
 ) -> Element {
     let active_class = match active {
-        true => "text-cyan-400",
-        false => "",
+        Some(true) => "text-cyan-400",
+        Some(false) | None => "",
     };
+    let onclick = move |_| {
+        if let Some(click) = onclick {
+            click.call(())
+        }
+    };
+    let id = id.unwrap_or_default();
     cx.render(rsx! {
         li {
-            class: "cursor-pointer group transition duration-300",
-            a { class: "{active_class}", onclick: move |_| onclick.call(()), children }
+            class: "cursor-pointer group transition duration-300", onclick: onclick,
+            a { id: id, class: "{active_class}", children }
             div { class: "max-w-0 group-hover:max-w-full transition-all duration-300 h-1 bg-cyan-400" }
         }
     })
 }
 
 #[inline_props]
-fn AddSite<'a>(cx: Scope, onadd: EventHandler<'a, FormEvent>) -> Element {
-    let shared_state = use_shared_state::<RootProps>(cx).unwrap();
-    let current_user = shared_state.read().current_user.clone();
-    let id = match current_user {
-        Some(_) => "",
-        None => "signup-btn",
+fn AddSite<'a>(
+    cx: Scope,
+    id: Option<&'a str>,
+    onadd: Option<EventHandler<'a, FormEvent>>,
+) -> Element {
+    let id = id.unwrap_or_default();
+    let onsubmit = move |event| {
+        if let Some(onadd) = onadd {
+            onadd.call(event)
+        }
     };
     cx.render(rsx! {
         form {
-            onsubmit: move |event| onadd.call(event),
+            onsubmit: onsubmit,
             class: "flex flex-col gap-2 w-full",
             TextInput { name: "url", placeholder: "https://example.com" }
             Button { id: "{id}", "Monitor a site" }
@@ -557,16 +638,7 @@ struct ButtonProps<'a> {
     id: Option<&'a str>,
     #[props(optional)]
     onclick: Option<EventHandler<'a, MouseEvent>>,
-    #[props(optional)]
-    style: Option<ButtonStyle>,
     children: Element<'a>,
-}
-
-#[derive(Default, Copy, Clone)]
-enum ButtonStyle {
-    Small,
-    #[default]
-    Default,
 }
 
 fn Button<'a>(cx: Scope<'a, ButtonProps<'a>>) -> Element {
@@ -574,7 +646,6 @@ fn Button<'a>(cx: Scope<'a, ButtonProps<'a>>) -> Element {
         id,
         onclick,
         children,
-        style,
     } = cx.props;
     let onclick = move |event| {
         if let Some(click) = onclick {
@@ -582,19 +653,37 @@ fn Button<'a>(cx: Scope<'a, ButtonProps<'a>>) -> Element {
         }
     };
     let id = id.unwrap_or_default();
-    let style = style.unwrap_or_default();
-    let default_class = "bg-cyan-400 text-white rounded-3xl box-shadow-md shadow-cyan-600 hover:box-shadow-xs hover:top-0.5 active:shadow-none active:top-1 relative";
-    let class = match style {
-        ButtonStyle::Small => "px-2 py-1",
-        ButtonStyle::Default => "px-4 py-3 w-full",
-    };
-    let class = format!("{default_class} {}", class);
     cx.render(rsx! {
         button {
             id: id,
-            class: "{class}",
+            class: "px-4 py-3 w-full bg-cyan-400 text-white rounded-3xl box-shadow-md shadow-cyan-600 hover:box-shadow-xs hover:top-0.5 active:shadow-none active:top-1 relative",
             onclick: onclick,
             children
+        }
+    })
+}
+
+fn Fab<'a>(cx: Scope<'a, ButtonProps<'a>>) -> Element {
+    let ButtonProps {
+        id,
+        onclick,
+        children,
+    } = cx.props;
+    let onclick = move |event| {
+        if let Some(click) = onclick {
+            click.call(event);
+        }
+    };
+    let id = id.unwrap_or_default();
+    cx.render(rsx! {
+        div {
+            class: "absolute bottom-24 right-4 z-20",
+            button {
+                id: id,
+                class: "h-12 w-12 rounded-full bg-cyan-400 text-white box-shadow-md shadow-cyan-600 hover:box-shadow-xs hover:top-0.5 active:shadow-none active:top-1 relative",
+                onclick: onclick,
+                children
+            }
         }
     })
 }
@@ -618,24 +707,21 @@ fn TextInput<'a>(cx: Scope<'a, TextInputProps<'a>>) -> Element {
     })
 }
 
-fn current_user(cx: Scope) -> Option<User> {
-    if let Some(ss) = use_shared_state::<RootProps>(cx) {
-        ss.read().current_user.clone()
-    } else {
-        None
-    }
-}
-
-fn Account(cx: Scope) -> Element {
-    // current user is required here
-    // this should panic if this component
-    // is somehow accessed without user
-    let login_code = current_user(cx).unwrap().login_code.clone();
+#[inline_props]
+fn Account<'a>(
+    cx: Scope,
+    current_user: &'a Option<User>,
+    onnav: EventHandler<'a, View>,
+) -> Element {
+    let login_code = match current_user {
+        Some(u) => u.login_code.clone(),
+        None => "".to_string(),
+    };
     cx.render(rsx! {
         div {
             class: "grid place-content-center gap-4",
             LoginCodeAlert { login_code: login_code }
-            Button { id: "logout-btn", "Logout" }
+            Button { onclick: move |_| onnav.call(View::Monitors), "View your sites" }
         }
     })
 }
@@ -643,15 +729,12 @@ fn Account(cx: Scope) -> Element {
 #[inline_props]
 fn LoginCodeAlert(cx: Scope, login_code: String) -> Element {
     let blur_class = use_state(cx, || "blur-sm");
-    let text = use_state(cx, || "Show");
     let onclick = move |_| {
         to_owned![blur_class];
         if blur_class == "blur-sm" {
             blur_class.set("");
-            text.set("Hide");
         } else {
             blur_class.set("blur-sm");
-            text.set("Show");
         }
     };
     cx.render(rsx! {
@@ -659,11 +742,8 @@ fn LoginCodeAlert(cx: Scope, login_code: String) -> Element {
             class: "bg-blue-50 p-4 rounded-md text-blue-500 flex flex-col gap-1",
             p { "This is the only identifier you need to use updown." }
             p { "No email, no username. Just simplicity." }
-            div {
-                class: "flex gap-2",
-                div { class: "font-bold text-2xl {blur_class}", "{login_code}" }
-                Button { onclick: onclick, style: ButtonStyle::Small, "{text}" }
-            }
+            p { "Click to show your login code." }
+            div { onclick: onclick, class: "cursor-pointer font-bold text-2xl {blur_class}", "{login_code}" }
         }
     })
 }
