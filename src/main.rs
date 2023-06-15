@@ -413,28 +413,37 @@ fn Root(cx: Scope<RootProps>) -> Element {
             }
         }
         Nav { onclick: onnav, active_view: view.get() }
-        Fab { 
-            onclick: show_add_site_sheet,
-            div { class: "text-2xl", "+" } 
-        }
-        Sheet {
-            shown: *add_site_sheet_shown.get(),
-            onclose: move |_| {
-                to_owned![add_site_sheet_shown];
-                add_site_sheet_shown.set(false);
-            }
-            div {
-                AddSite { onadd: onadd }
+        if current_user.is_some() {
+            rsx! {
+                Fab {
+                    onclick: show_add_site_sheet,
+                    div { class: "text-2xl", "+" }
+                }
+                Sheet {
+                    shown: *add_site_sheet_shown.get(),
+                    onclose: move |_| {
+                        to_owned![add_site_sheet_shown];
+                        add_site_sheet_shown.set(false);
+                    }
+                    div {
+                        AddSite { onadd: onadd }
+                    }
+                }
             }
         }
     })
 }
 
 #[inline_props]
-fn Sheet<'a>(cx: Scope, shown: bool, onclose: EventHandler<'a>, children: Element<'a>) -> Element<'a> {
+fn Sheet<'a>(
+    cx: Scope,
+    shown: bool,
+    onclose: EventHandler<'a>,
+    children: Element<'a>,
+) -> Element<'a> {
     let translate_y = match shown {
         true => "",
-        false => "translate-y-full"
+        false => "translate-y-full",
     };
     return cx.render(
         rsx! {
@@ -523,14 +532,15 @@ fn Nav<'a>(cx: Scope, onclick: EventHandler<'a, View>, active_view: &'a View) ->
             class: "fixed lg lg:top-0 lg:bottom-auto bottom-0 w-full py-6 dark:bg-gray-900",
             ul {
                 class: "flex lg:justify-center lg:gap-4 justify-around",
-                NavLink { active: **active_view == View::Monitors, onclick: move |_| onclick.call(View::Monitors), "Sites" }
                 if logged_in {
                     rsx! {
+                        NavLink { active: **active_view == View::Monitors, onclick: move |_| onclick.call(View::Monitors), "Sites" }
                         NavLink { active: **active_view == View::Account, onclick: move |_| onclick.call(View::Account), "Account" }
                         NavLink { id: "logout-btn", "Logout" }
                     }
                 } else {
                     rsx! {
+                        NavLink { active: **active_view == View::Index, onclick: move |_| onclick.call(View::Index), "Home" }
                         NavLink { active: **active_view == View::Login, onclick: move |_| onclick.call(View::Login), "Login" }
                     }
                 }
