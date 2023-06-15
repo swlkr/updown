@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
         .unwrap();
     let args: Vec<String> = std::env::args().collect();
     let Some(arg) = args.get(1) else {
+        db().migrate().await?;
         server().await?;
         return Ok(());
     };
