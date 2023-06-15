@@ -753,7 +753,7 @@ fn LoginCodeAlert(cx: Scope, login_code: String) -> Element {
             p { "This is the only identifier you need to use updown." }
             p { "No email, no username. Just simplicity." }
             p { "Click to show your login code." }
-            div { onclick: onclick, class: "cursor-pointer font-bold text-2xl {blur_class}", "{login_code}" }
+            div { onclick: onclick, class: "cursor-pointer font-bold text-xl {blur_class}", "{login_code}" }
         }
     })
 }
