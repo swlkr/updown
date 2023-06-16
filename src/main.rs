@@ -152,6 +152,7 @@ fn routes() -> Router {
     let session_handler = SessionHandler::builder(CookieStore::new(), &session_key.as_bytes())
         .cookie_name("id")
         .same_site_policy(SameSite::Strict)
+        .session_ttl(Some(std::time::Duration::from_secs(604_800)))
         .build()
         .unwrap();
     let view = LiveViewPool::new();
