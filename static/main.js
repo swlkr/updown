@@ -1109,11 +1109,11 @@ function connect(root, interpreter) {
     ws.onopen = () => {
       interval = setInterval(() => ws.send("__ping__"), 45000);
       ws.send(serializeIpcMessage("initialize"));
+      if(root.innerHTML.length !== 0) { root.innerHTML = ""; }
     };
 
     ws.onerror = (err) => {
         if(!!interval) { clearInterval(interval); }
-        root.innerHTML = `I'm probably pushing some new code. Automatically trying to reconnect every ${RETRY_MS / 1000} seconds.`;
         setTimeout(() => {
           main();
         }, RETRY_MS);
@@ -1139,21 +1139,66 @@ function connect(root, interpreter) {
 
 class IPC {
   constructor(root) {
-    let interpreter = new Interpreter(root, new InterpreterConfig(false));
-    this.ws = connect(root, interpreter);
+    this.root = root;
+    this.interpreter = new Interpreter(root, new InterpreterConfig(false));
+    this.connect();
   }
 
   postMessage(msg) {
     this.ws.send(msg);
   }
+
+  // -> ws
+  connect() {
+    let ws = new WebSocket(WS_ADDR);
+    let interval = null;
+
+    ws.onopen = () => {
+      interval = setInterval(() => ws.send("__ping__"), 45000);
+      ws.send(serializeIpcMessage("initialize"));
+      if(this.root.innerHTML.length !== 0) { this.root.innerHTML = ""; }
+    };
+
+    ws.onerror = (err) => {
+        if(!!interval) { clearInterval(interval); }
+        setTimeout(() => {
+          this.connect()
+        }, RETRY_MS);
+    };
+
+    ws.onmessage = (message) => {
+        if (message.data !== "__pong__") {
+          const event = JSON.parse(message.data);
+          switch (event.type) {
+            case "edits":
+              let edits = event.data;
+              this.interpreter.handleEdits(edits);
+              break;
+            case "query":
+              Function("Eval", `"use strict";${event.data};`)();
+              break;
+          }
+        }
+    };
+
+    this.ws = ws;
+  }
 }
 
 function main() {
   let root = window.document.getElementById("main");
-  if (root != null) {
-    if(root.innerHTML.length !== 0) { root.innerHTML = ""; }
+  if (root !== null) {
     window.ipc = new IPC(root);
   }
 }
+
+window.addEventListener("visibilitychange", () => {
+  if(
+    window.ipc?.ws?.readyState === WebSocket.CLOSING ||
+    window.ipc?.ws?.readyState === WebSocket.CLOSED
+  ) {
+    window.ipc.connect();
+  }
+});
 
 main();
